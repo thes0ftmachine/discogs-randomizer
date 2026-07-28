@@ -377,6 +377,7 @@ function DiscoverTab() {
   const [emptyNotice, setEmptyNotice] = useState("");
   const [history, setHistory] = useState([]);
   const [modeNotice, setModeNotice] = useState("");
+  const [imageIndex, setImageIndex] = useState(0);
 
   const formRef = useRef(null);
   const resultRef = useRef(null);
@@ -411,6 +412,12 @@ function DiscoverTab() {
       statusRef.current.scrollIntoView({ behavior: "smooth", block: "center" });
     }
   }, [error, emptyNotice]);
+
+  // Each new pick starts back at its first image rather than whatever slide the previous
+  // release happened to be left on.
+  useEffect(() => {
+    setImageIndex(0);
+  }, [result?.id]);
 
   function scrollToFilters() {
     formRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
@@ -611,7 +618,8 @@ function DiscoverTab() {
     }
   }
 
-  const coverSrc = detail?.images?.[0]?.uri || detail?.images?.[0]?.uri150 || result?.cover_image || null;
+  const images = detail?.images || [];
+  const coverSrc = images[imageIndex]?.uri || images[imageIndex]?.uri150 || result?.cover_image || null;
   const { artist, title } = splitArtistTitle(result, detail);
   const ratingInfo = detail?.community?.rating;
   const hasResultContext = !!result;
@@ -738,12 +746,35 @@ function DiscoverTab() {
 
       {result && (
         <div style={{ ...styles.card, ...(loading ? styles.cardDimmed : {}) }} ref={resultRef}>
-          <SmartImage
-            src={coverSrc}
-            alt={title}
-            style={styles.cover}
-            placeholderStyle={styles.coverPlaceholder}
-          />
+          <div style={styles.coverWrap}>
+            <SmartImage
+              src={coverSrc}
+              alt={title}
+              style={styles.cover}
+              placeholderStyle={styles.coverPlaceholder}
+            />
+            {images.length > 1 && (
+              <>
+                <button
+                  type="button"
+                  aria-label="Previous image"
+                  style={{ ...styles.imageArrow, left: 8 }}
+                  onClick={() => setImageIndex((i) => (i - 1 + images.length) % images.length)}
+                >
+                  ‹
+                </button>
+                <button
+                  type="button"
+                  aria-label="Next image"
+                  style={{ ...styles.imageArrow, right: 8 }}
+                  onClick={() => setImageIndex((i) => (i + 1) % images.length)}
+                >
+                  ›
+                </button>
+                <span style={styles.imageDots}>{imageIndex + 1} / {images.length}</span>
+              </>
+            )}
+          </div>
           <div style={styles.cardBody}>
             <h2 style={styles.cardTitle}>{title}</h2>
             {artist && <p style={styles.cardArtist}>{artist}</p>}
