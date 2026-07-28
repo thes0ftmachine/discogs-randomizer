@@ -5,8 +5,15 @@ const GENRE_STYLES = {
   "Any Genre": [],
 "Blues": [
     "Chicago Blues",
+  "Country Blues",
     "Delta Blues",
-    "Electric Blues"
+    "Electric Blues",
+  "Hill Country Blues",
+   "Louisiana Blues",
+  "Memphis Blues",
+  "Modern Electric Blues",
+  "Texas Blues"
+  
   ],
   "Classical": [
     "Baroque",
@@ -28,10 +35,15 @@ const GENRE_STYLES = {
   "Folk, World, & Country": [
     "African",
     "Afrobeat",
+     "Celtic",
     "Country",
     "Flamenco",
     "Folk",
-    "Latin"
+    "Highlife",
+    "Indian Classical",
+    "Latin",
+    "Samba",
+    "Shamisen"
   ],
   "Funk / Soul": [
     "Disco",
@@ -50,15 +62,27 @@ const GENRE_STYLES = {
     "Trip Hop"
   ],
   "Jazz": [
+    "Afro-Cuban Jazz",
+    "Afrobeat",
     "Avant-garde Jazz",
     "Big Band",
     "Bop",
+    "Bossa Nova",
+    "Cape Jazz",
+    "Contemporary Jazz",
+    "Cool Jazz",
+    "Free Improvisation",
     "Free Jazz",
     "Fusion",
+    "Hard Bop",
+    "Jazz-Funk",
+    "Jazz-Rock",
     "Latin Jazz",
     "Modal",
     "Post Bop",
-    "Soul-Jazz"
+    "Smooth Jazz",
+    "Soul-Jazz",
+    "Space-Age"
   ],
   "Latin": [
     "Boogaloo",
