@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useEffect, useCallback } from "react";
+import React, { useState, useMemo, useEffect, useCallback, useRef } from "react";
 
 // ---- Controlled vocab (mirrors Discogs' own genre/style taxonomy, trimmed to common picks) ----
 const GENRE_STYLES = {
@@ -135,7 +135,22 @@ function DiscoverTab() {
   const [emptyNotice, setEmptyNotice] = useState("");
   const [history, setHistory] = useState([]);
 
+  const formRef = useRef(null);
+  const resultRef = useRef(null);
+
   const styleOptions = useMemo(() => GENRE_STYLES[genre] || [], [genre]);
+
+  // Once a result lands, bring the card to the top of the viewport — handy on mobile where
+  // the filter form pushes the card below the fold.
+  useEffect(() => {
+    if (result && resultRef.current) {
+      resultRef.current.scrollIntoView({ behavior: "smooth", block: "start" });
+    }
+  }, [result]);
+
+  function scrollToFilters() {
+    formRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+  }
 
   function toggleFormat(f) {
     setFormats((prev) => (prev.includes(f) ? prev.filter((x) => x !== f) : [...prev, f]));
@@ -230,7 +245,7 @@ function DiscoverTab() {
 
   return (
     <>
-      <div style={styles.form}>
+      <div style={styles.form} ref={formRef}>
         <div style={styles.fieldRow}>
           <label style={styles.label}>Genre</label>
           <select
@@ -327,7 +342,7 @@ function DiscoverTab() {
       {emptyNotice && <div style={styles.emptyBox}>{emptyNotice}</div>}
 
       {result && (
-        <div style={styles.card}>
+        <div style={styles.card} ref={resultRef}>
           {coverSrc ? (
             <img src={coverSrc} alt={result.title} style={styles.cover} />
           ) : (
@@ -370,6 +385,12 @@ function DiscoverTab() {
             </a>
           </div>
         </div>
+      )}
+
+      {result && (
+        <button style={styles.backToFiltersButton} onClick={scrollToFilters}>
+          ↑ Back to filters
+        </button>
       )}
 
       {history.length > 1 && (
@@ -981,6 +1002,19 @@ const styles = {
   metaLine: { fontSize: 13, color: "#444", margin: "4px 0" },
   link: { display: "inline-block", marginTop: 10, fontSize: 14, color: "#1a1a1a", fontWeight: 600, textDecoration: "underline" },
   historySection: { marginTop: 24 },
+  backToFiltersButton: {
+    display: "block",
+    width: "100%",
+    marginTop: 12,
+    padding: "10px 14px",
+    borderRadius: 6,
+    border: "1px solid #d4d4d4",
+    background: "#fff",
+    color: "#555",
+    fontSize: 13,
+    fontWeight: 600,
+    cursor: "pointer",
+  },
   historyTitle: { fontSize: 13, fontWeight: 600, color: "#666", marginBottom: 8 },
   historyRow: { display: "flex", gap: 10, overflowX: "auto" },
   historyItem: { display: "flex", flexDirection: "column", alignItems: "center", width: 64 },
