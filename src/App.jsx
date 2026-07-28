@@ -7,13 +7,16 @@ const GENRE_STYLES = {
   "Electronic": ["House", "Techno", "Ambient", "Disco", "Synth-pop", "Downtempo", "Acid", "IDM", "Electro"],
   "Funk / Soul": ["Funk", "Soul", "Disco", "Rhythm & Blues", "Neo Soul", "P.Funk"],
   "Hip Hop": ["Conscious", "Boom Bap", "G-Funk", "Trip Hop", "Instrumental", "Gangsta"],
-  "Rock": ["Psychedelic Rock", "Prog Rock", "Krautrock", "Punk", "Post-Punk", "Shoegaze", "Garage Rock", "Folk Rock"],
+  "Rock": [
+    "Psychedelic Rock", "Prog Rock", "Krautrock", "Punk", "Post-Punk", "Shoegaze", "Garage Rock", "Folk Rock",
+    "Heavy Metal", "Thrash", "Death Metal", "Black Metal", "Doom Metal", "Speed Metal", "AOR", "Nu Metal", "Sludge Metal",
+  ],
   "Folk, World, & Country": ["Folk", "Country", "African", "Afrobeat", "Latin", "Flamenco"],
   "Latin": ["Salsa", "Bossa Nova", "Cumbia", "Boogaloo", "MPB"],
   "Reggae": ["Dub", "Roots Reggae", "Dancehall", "Ska"],
   "Classical": ["Baroque", "Romantic", "Modern", "Contemporary"],
   "Blues": ["Chicago Blues", "Delta Blues", "Electric Blues"],
-  "Pop": ["Synth-pop", "City Pop", "Europop"],
+  "Pop": ["Synth-pop", "City Pop", "Europop", "Bubblegum", "Indie Pop", "Vocal", "Chanson", "Kayōkyoku", "Ballad"],
 };
 
 const DECADES = ["Any Decade", "1950s", "1960s", "1970s", "1980s", "1990s", "2000s", "2010s", "2020s"];
@@ -31,10 +34,7 @@ const COUNTRIES = [
 // more than one, we broaden the query and filter candidates client-side instead.
 const FORMAT_OPTIONS = ["Vinyl", "CD", "Cassette", "7\"", "10\"", "12\"", "LP", "Box Set"];
 
-// Paste a free Discogs personal access token here (Settings → Developers → Generate new
-// token) to raise the rate limit from 25 requests/min to 60/min. This sits in plain
-// JavaScript, visible to anyone who opens dev tools — fine for a personal token shared
-// casually, but don't reuse anything more sensitive here.
+// token should allow more api calls per minute
 const DISCOGS_TOKEN = "OuCkuNqsWZqxcNAePtBpdrvpkIQlVbBJOqgzJDpo";
 
 function randomYearInDecade(decade) {
@@ -596,14 +596,15 @@ function HigherLowerGame() {
 
       {champion && challenger && (
         <div style={styles.duelRow}>
-          <GameCard release={champion} statMeta={statMeta} revealed value={champion.value} />
+          <GameCard release={champion} statMeta={statMeta} role="Champion" statRevealed value={champion.value} />
           <div style={styles.vsCol}>
             <span style={styles.vsText}>vs</span>
           </div>
           <GameCard
             release={challenger}
             statMeta={statMeta}
-            revealed={revealed}
+            role="Challenger"
+            statRevealed={revealed}
             value={challenger.value}
             resultBanner={revealed ? (lastCorrect ? "Correct!" : "Missed it") : null}
           />
@@ -624,22 +625,23 @@ function HigherLowerGame() {
   );
 }
 
-function GameCard({ release, statMeta, revealed, value, resultBanner }) {
+function GameCard({ release, statMeta, role, statRevealed, value, resultBanner }) {
   const detail = release.detail;
   const pick = release.pick;
   const cover = detail?.images?.[0]?.uri || detail?.images?.[0]?.uri150 || pick?.cover_image || null;
 
   return (
     <div style={styles.gameCard}>
+      <span style={styles.roleLabel}>{role}</span>
       {cover ? (
-        <img src={cover} alt={revealed ? pick.title : "Hidden release"} style={styles.gameCover} />
+        <img src={cover} alt={pick.title} style={styles.gameCover} />
       ) : (
         <div style={{ ...styles.gameCover, ...styles.coverPlaceholder }}>No image</div>
       )}
       <div style={styles.gameCardBody}>
-        <p style={styles.gameCardTitle}>{revealed ? pick.title : "?"}</p>
+        <p style={styles.gameCardTitle}>{pick.title}</p>
         <p style={styles.gameCardStat}>
-          {revealed ? statMeta.format(value) : "??? " + statMeta.label}
+          {statRevealed ? statMeta.format(value) : "??? " + statMeta.label}
         </p>
         {resultBanner && (
           <p style={{ ...styles.resultBanner, color: resultBanner === "Correct!" ? "#1e7d32" : "#b3261e" }}>
@@ -1067,6 +1069,17 @@ const styles = {
     overflow: "hidden",
     display: "flex",
     flexDirection: "column",
+  },
+  roleLabel: {
+    display: "block",
+    textAlign: "center",
+    padding: "4px 6px",
+    fontSize: 10.5,
+    fontWeight: 700,
+    letterSpacing: 0.5,
+    textTransform: "uppercase",
+    color: "#666",
+    background: "#f0f0f0",
   },
   gameCover: { width: "100%", height: 180, objectFit: "cover", background: "#f0f0f0" },
   gameCardBody: { padding: 12 },
