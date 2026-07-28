@@ -766,7 +766,7 @@ function DiscoverTab() {
             🔁 Another like this
           </button>
           <button style={styles.modeButton} onClick={handleWeirder} disabled={loading}>
-            🌀 Weirder
+            🌀 Obscurer
           </button>
           <button style={styles.modeButton} onClick={handleHiddenGem} disabled={loading}>
             💎 Hidden gem
