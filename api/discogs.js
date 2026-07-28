@@ -14,12 +14,44 @@ export default async function handler(req, res) {
   const url = new URL(path, DISCOGS_BASE);
   if (kind === "search") Object.entries(params).forEach(([key, value]) => { if (typeof value === "string") url.searchParams.set(key, value); });
   url.searchParams.set("token", token);
-  try {
-    const upstream = await fetch(url, { headers: { "User-Agent": "RandomDiscovery/1.0" } });
-    const retryAfter = upstream.headers.get("retry-after");
-    const data = await upstream.json().catch(() => ({}));
-    if (!upstream.ok) return sendError(res, upstream.status, data.message || "Discogs could not complete that request.", retryAfter);
-    res.setHeader("Cache-Control", kind === "release" ? "s-maxage=3600, stale-while-revalidate=86400" : "no-store");
-    return res.status(200).json(data);
-  } catch { return sendError(res, 502, "Discogs is temporarily unavailable. Please try again."); }
+try {
+  const upstream = await fetch(url, {
+    headers: { "User-Agent": "RandomDiscovery/1.0" }
+  });
+
+  const retryAfter = upstream.headers.get("retry-after");
+  const data = await upstream.json().catch(() => ({}));
+
+  // Debug search responses
+  if (kind === "search") {
+    console.log("========== DISCOGS SEARCH ==========");
+    console.log("Query:", params);
+    console.log("Items:", data.pagination?.items);
+    console.log("First result:");
+    console.log(JSON.stringify(data.results?.[0], null, 2));
+    console.log("====================================");
+  }
+
+  if (!upstream.ok)
+    return sendError(
+      res,
+      upstream.status,
+      data.message || "Discogs could not complete that request.",
+      retryAfter
+    );
+
+  res.setHeader(
+    "Cache-Control",
+    kind === "release"
+      ? "s-maxage=3600, stale-while-revalidate=86400"
+      : "no-store"
+  );
+
+  return res.status(200).json(data);
+} catch {
+  return sendError(
+    res,
+    502,
+    "Discogs is temporarily unavailable. Please try again."
+  );
 }
