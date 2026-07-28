@@ -32,7 +32,7 @@ const COUNTRIES = [
 
 // Discogs' search "format" param only takes one value at a time. When the person selects
 // more than one, we broaden the query and filter candidates client-side instead.
-const FORMAT_OPTIONS = ["Vinyl", "CD", "Cassette", "7\"", "10\"", "12\"", "LP", "Box Set"];
+const FORMAT_OPTIONS = ["Vinyl", "LP", "CD", "Cassette", "7\"", "10\"", "12\"", "Box Set"];
 
 // token should allow more api calls per minute
 const DISCOGS_TOKEN = "OuCkuNqsWZqxcNAePtBpdrvpkIQlVbBJOqgzJDpo";
