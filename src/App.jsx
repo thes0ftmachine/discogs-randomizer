@@ -49,7 +49,7 @@ async function discogsFetch(params) {
   const res = await fetch(url);
   if (!res.ok) {
     if (res.status === 429) throw new Error("Discogs is rate-limiting us right now — wait a few seconds and try again.");
-    throw new Error("Discogs lookup failed (" + res.status + ").");
+    throw new Error("Discogs lookup failed (" + res.status + "). Try refreshing, sometimes Discogs throws a fit and doesn't want to play along.");
   }
   return res.json();
 }
@@ -62,7 +62,7 @@ async function discogsFetchDetail(resourceUrl) {
     ? resourceUrl + (resourceUrl.includes("?") ? "&" : "?") + "token=" + encodeURIComponent(DISCOGS_TOKEN)
     : resourceUrl;
   const res = await fetch(url);
-  if (!res.ok) throw new Error("Couldn't load release detail (" + res.status + ").");
+  if (!res.ok) throw new Error("Couldn't load release detail (" + res.status + "). Try refreshing. Sometimes Discogs just doesn't want to play nice.");
   return res.json();
 }
 
@@ -177,15 +177,26 @@ function DiscoverTab() {
       const baseParams = buildParams(year);
       const needsClientFormatCheck = formats.length > 1;
       const needsRatingCheck = minRating > 0;
-      const maxAttempts = needsClientFormatCheck || needsRatingCheck ? 10 : 1;
+      // Even with no extra filters, give it a few attempts — Discogs' search endpoint
+      // occasionally throws a transient 404/429 on an otherwise valid request, and a single
+      // hiccup shouldn't kill the whole search.
+      const maxAttempts = needsClientFormatCheck || needsRatingCheck ? 10 : 4;
 
       let found = null;
       let foundDetail = null;
       let anyResultsAtAll = false;
 
       for (let i = 0; i < maxAttempts; i++) {
-        const pick = await randomReleaseSearch(baseParams);
-        if (!pick) break; // no matches for base filters at all — no point retrying
+        if (i > 0) await sleep(150);
+
+        let pick;
+        try {
+          pick = await randomReleaseSearch(baseParams);
+        } catch (e) {
+          if (String(e?.message || "").includes("rate-limiting")) await sleep(1200);
+          continue; // transient hiccup on the search itself — retry rather than failing outright
+        }
+        if (!pick) break; // Discogs genuinely has zero matches for these filters
         anyResultsAtAll = true;
 
         if (needsClientFormatCheck) {
@@ -236,7 +247,7 @@ function DiscoverTab() {
         }
       }
     } catch (e) {
-      setError(e.message || "Something went wrong.");
+      setError(e.message || "Something went wrong. Try refreshing, maybe Discogs is going to the bathroom or something...");
       setLoading(false);
     }
   }
@@ -501,13 +512,13 @@ function HigherLowerGame() {
     setScore(0);
     try {
       const first = await drawValidRelease(key, null);
-      if (!first) throw new Error("Couldn't find a release with that stat available. Try a different stat.");
+      if (!first) throw new Error("Couldn't find a release with that stat available. Try a different stat. If that makes no sense to you, just refresh the dang thing.");
       const second = await drawValidRelease(key, first.pick.id);
-      if (!second) throw new Error("Couldn't find a second release with that stat available. Try again.");
+      if (!second) throw new Error("Couldn't find a second release with that stat available. Try again with a refresh. Discogs might be getting tired of playing, even if you haven't been playing long.");
       setChampion(first);
       setChallenger(second);
     } catch (e) {
-      setError(e.message || "Something went wrong.");
+      setError(e.message || "Something went wrong. I don't know what... maybe try refreshing and giving it a minute. Discogs gets lazy if you're too quick for it.");
     } finally {
       setLoading(false);
     }
@@ -537,7 +548,7 @@ function HigherLowerGame() {
         setLoading(true);
         try {
           const next = await drawValidRelease(statKey, challenger.pick.id);
-          if (!next) throw new Error("Couldn't find a fresh challenger. Try again.");
+          if (!next) throw new Error("Couldn't find a fresh challenger. Try refreshing. Discogs is probably just on a bathroom break.");
           setChampion(challenger);
           setChallenger(next);
           setRevealed(false);
@@ -721,10 +732,10 @@ function GuessGenreGame() {
     setImageIndex(0);
     try {
       const next = await drawGenreRound(excludeId);
-      if (!next) throw new Error("Couldn't pull a fresh release right now. Try again in a moment.");
+      if (!next) throw new Error("Couldn't pull a fresh release right now. Try again in a moment... it's likely that Discogs is on a potty break.");
       setRound(next);
     } catch (e) {
-      setError(e.message || "Something went wrong.");
+      setError(e.message || "Something went wrong. I think Discogs doesn't want to play along right now.");
     } finally {
       setLoading(false);
     }
