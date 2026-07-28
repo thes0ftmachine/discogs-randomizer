@@ -49,7 +49,7 @@ async function discogsFetch(params) {
   const res = await fetch(url);
   if (!res.ok) {
     if (res.status === 429) throw new Error("Discogs is rate-limiting us right now — wait a few seconds and try again.");
-    throw new Error("Discogs lookup failed (" + res.status + "). Try refreshing, sometimes Discogs throws a fit and doesn't want to play along.");
+    throw new Error("Discogs lookup failed (" + res.status + ").");
   }
   return res.json();
 }
@@ -62,7 +62,7 @@ async function discogsFetchDetail(resourceUrl) {
     ? resourceUrl + (resourceUrl.includes("?") ? "&" : "?") + "token=" + encodeURIComponent(DISCOGS_TOKEN)
     : resourceUrl;
   const res = await fetch(url);
-  if (!res.ok) throw new Error("Couldn't load release detail (" + res.status + "). Try refreshing. Sometimes Discogs just doesn't want to play nice.");
+  if (!res.ok) throw new Error("Couldn't load release detail (" + res.status + ").");
   return res.json();
 }
 
@@ -247,7 +247,7 @@ function DiscoverTab() {
         }
       }
     } catch (e) {
-      setError(e.message || "Something went wrong. Try refreshing, maybe Discogs is going to the bathroom or something...");
+      setError(e.message || "Something went wrong.");
       setLoading(false);
     }
   }
@@ -475,7 +475,12 @@ async function drawValidRelease(statKey, excludeId, attempts = 5) {
   for (let i = 0; i < attempts; i++) {
     if (i > 0) await sleep(150); // small gap between attempts eases pressure on the unauthenticated rate limit
     try {
-      const pick = await randomReleaseSearch({ type: "release", format: "Vinyl" }, excludeId);
+      // A fully unfiltered vinyl search has tens of millions of matches, far more than our
+      // page cap can meaningfully sample, so it ends up skewed toward whatever Discogs'
+      // default ranking favors (heavily Electronic). Picking a random genre first and
+      // searching within it keeps each genre's odds even instead.
+      const genre = GAME_GENRES[Math.floor(Math.random() * GAME_GENRES.length)];
+      const pick = await randomReleaseSearch({ type: "release", format: "Vinyl", genre }, excludeId);
       if (!pick) continue;
       const detail = await discogsFetchDetail(pick.resource_url);
       const value = getStatValue(detail, statKey);
@@ -512,13 +517,13 @@ function HigherLowerGame() {
     setScore(0);
     try {
       const first = await drawValidRelease(key, null);
-      if (!first) throw new Error("Couldn't find a release with that stat available. Try a different stat. If that makes no sense to you, just refresh the dang thing.");
+      if (!first) throw new Error("Couldn't find a release with that stat available. Try a different stat.");
       const second = await drawValidRelease(key, first.pick.id);
-      if (!second) throw new Error("Couldn't find a second release with that stat available. Try again with a refresh. Discogs might be getting tired of playing, even if you haven't been playing long.");
+      if (!second) throw new Error("Couldn't find a second release with that stat available. Try again.");
       setChampion(first);
       setChallenger(second);
     } catch (e) {
-      setError(e.message || "Something went wrong. I don't know what... maybe try refreshing and giving it a minute. Discogs gets lazy if you're too quick for it.");
+      setError(e.message || "Something went wrong.");
     } finally {
       setLoading(false);
     }
@@ -548,7 +553,7 @@ function HigherLowerGame() {
         setLoading(true);
         try {
           const next = await drawValidRelease(statKey, challenger.pick.id);
-          if (!next) throw new Error("Couldn't find a fresh challenger. Try refreshing. Discogs is probably just on a bathroom break.");
+          if (!next) throw new Error("Couldn't find a fresh challenger. Try again.");
           setChampion(challenger);
           setChallenger(next);
           setRevealed(false);
@@ -697,7 +702,10 @@ async function drawGenreRound(excludeId, attempts = 5) {
   for (let i = 0; i < attempts; i++) {
     if (i > 0) await sleep(150);
     try {
-      const pick = await randomReleaseSearch({ type: "release", format: "Vinyl" }, excludeId);
+      // Same fix as Higher/Lower: search within a randomly chosen genre each attempt so the
+      // draw is spread evenly across genres instead of skewed by Discogs' default ranking.
+      const genre = GAME_GENRES[Math.floor(Math.random() * GAME_GENRES.length)];
+      const pick = await randomReleaseSearch({ type: "release", format: "Vinyl", genre }, excludeId);
       if (!pick) continue;
       if (!pick.genre || pick.genre.length === 0) continue;
       const detail = await discogsFetchDetail(pick.resource_url);
@@ -732,10 +740,10 @@ function GuessGenreGame() {
     setImageIndex(0);
     try {
       const next = await drawGenreRound(excludeId);
-      if (!next) throw new Error("Couldn't pull a fresh release right now. Try again in a moment... it's likely that Discogs is on a potty break.");
+      if (!next) throw new Error("Couldn't pull a fresh release right now. Try again in a moment.");
       setRound(next);
     } catch (e) {
-      setError(e.message || "Something went wrong. I think Discogs doesn't want to play along right now.");
+      setError(e.message || "Something went wrong.");
     } finally {
       setLoading(false);
     }
