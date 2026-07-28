@@ -62,7 +62,7 @@ async function discogsFetchDetail(resourceUrl) {
     ? resourceUrl + (resourceUrl.includes("?") ? "&" : "?") + "token=" + encodeURIComponent(DISCOGS_TOKEN)
     : resourceUrl;
   const res = await fetch(url);
-  if (!res.ok) throw new Error("Couldn't load release detail (" + res.status + ").");
+  if (!res.ok) throw new Error("Couldn't load release detail (" + res.status + "). I think Discogs is on break. Try refreshing in a second.");
   return res.json();
 }
 
@@ -94,7 +94,7 @@ export default function App() {
       <div style={styles.container}>
         <header style={styles.header}>
           <h1 style={styles.title}>Random Discovery</h1>
-          <p style={styles.subtitle}>Explore Discogs, one spin at a time.</p>
+          <p style={styles.subtitle}>Explore the depths of Discogs releases at random (kind of) or play a few mini games.</p>
         </header>
 
         <div style={styles.tabRow}>
@@ -247,7 +247,7 @@ function DiscoverTab() {
         }
       }
     } catch (e) {
-      setError(e.message || "Something went wrong.");
+      setError(e.message || "Something went wrong. Don't blame me. It's more than likely Discogs. Try again in a second.");
       setLoading(false);
     }
   }
@@ -517,13 +517,13 @@ function HigherLowerGame() {
     setScore(0);
     try {
       const first = await drawValidRelease(key, null);
-      if (!first) throw new Error("Couldn't find a release with that stat available. Try a different stat.");
+      if (!first) throw new Error("Couldn't find a release... Try waiting a second or just refreshing. Discogs is probably on a bathroom break.");
       const second = await drawValidRelease(key, first.pick.id);
-      if (!second) throw new Error("Couldn't find a second release with that stat available. Try again.");
+      if (!second) throw new Error("Couldn't find a second release with that stat available so try refreshing. Discogs likes to throw fits like this.");
       setChampion(first);
       setChallenger(second);
     } catch (e) {
-      setError(e.message || "Something went wrong.");
+      setError(e.message || "Something went wrong. Likely because of Discogs... try again in a few seconds.");
     } finally {
       setLoading(false);
     }
@@ -553,13 +553,13 @@ function HigherLowerGame() {
         setLoading(true);
         try {
           const next = await drawValidRelease(statKey, challenger.pick.id);
-          if (!next) throw new Error("Couldn't find a fresh challenger. Try again.");
+          if (!next) throw new Error("Couldn't find a fresh challenger. Try again. If you have no options to do anything, just refresh. Discogs is likely taking a break.");
           setChampion(challenger);
           setChallenger(next);
           setRevealed(false);
           setLastCorrect(null);
         } catch (e) {
-          setError(e.message || "Something went wrong.");
+          setError(e.message || "Something went wrong... but I don't know what. Most likely Discogs just gave up on life as it usually does.");
         } finally {
           setLoading(false);
         }
@@ -740,10 +740,10 @@ function GuessGenreGame() {
     setImageIndex(0);
     try {
       const next = await drawGenreRound(excludeId);
-      if (!next) throw new Error("Couldn't pull a fresh release right now. Try again in a moment.");
+      if (!next) throw new Error("Couldn't pull a fresh release right now. Try again in a moment. Most likely Discogs is just being lazy.");
       setRound(next);
     } catch (e) {
-      setError(e.message || "Something went wrong.");
+      setError(e.message || "Something went wrong. And by something, I mean Discogs... it's sooo lazy. Try refreshing.");
     } finally {
       setLoading(false);
     }
