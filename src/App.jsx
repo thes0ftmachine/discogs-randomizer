@@ -145,7 +145,7 @@ const COUNTRIES = [
 const FORMAT_OPTIONS = ["Vinyl", "LP", "CD", "Cassette", "7\"", "10\"", "12\"", "Box Set"];
 
 // token should allow more api calls per minute
-const DISCOGS_TOKEN = "OuCkuNqsWZqxcNAePtBpdrvpkIQlVbBJOqgzJDpo";
+const detailCache = new Map();
 
 function randomYearInDecade(decade) {
   if (decade === "Any Decade") return null;
@@ -153,33 +153,37 @@ function randomYearInDecade(decade) {
   return start + Math.floor(Math.random() * 10);
 }
 
-async function discogsFetch(params) {
-  const finalParams = DISCOGS_TOKEN ? { ...params, token: DISCOGS_TOKEN } : params;
-  const url = "https://api.discogs.com/database/search?" + new URLSearchParams(finalParams).toString();
-  const res = await fetch(url);
+async function apiFetch(params, signal) {
+  const res = await fetch("/api/discogs?" + new URLSearchParams(params), { signal });
   if (!res.ok) {
-    if (res.status === 429) throw new Error("Discogs is rate-limiting us right now — wait a few seconds and try again.");
-    throw new Error("Discogs lookup failed (" + res.status + ").");
+    const body = await res.json().catch(() => ({}));
+    const error = new Error(body.error || `Discogs lookup failed (${res.status}).`);
+    error.retryAfter = Number(res.headers.get("Retry-After")) || 0;
+    throw error;
   }
   return res.json();
+}
+
+async function discogsFetch(params, signal) {
+  return apiFetch({ kind: "search", ...params }, signal);
 }
 
 // The search endpoint's cover_image is unreliable (often a stale or generic spacer
 // image). Following up on the release's own resource_url gives the real images array
 // plus fields the search endpoint doesn't return at all, like lowest_price / community.rating.
-async function discogsFetchDetail(resourceUrl) {
-  const url = DISCOGS_TOKEN
-    ? resourceUrl + (resourceUrl.includes("?") ? "&" : "?") + "token=" + encodeURIComponent(DISCOGS_TOKEN)
-    : resourceUrl;
-  const res = await fetch(url);
-  if (!res.ok) throw new Error("Couldn't load release detail (" + res.status + "). I think Discogs is on break. Try refreshing in a second.");
-  return res.json();
+async function discogsFetchDetail(resourceUrl, signal) {
+  const id = String(resourceUrl || "").match(/\/releases\/(\d+)/)?.[1];
+  if (!id) throw new Error("That Discogs release is unavailable.");
+  if (detailCache.has(id)) return detailCache.get(id);
+  const detail = await apiFetch({ kind: "release", id }, signal);
+  detailCache.set(id, detail);
+  return detail;
 }
 
 // Shared random-pick engine: probe for total matches, jump to a random page, grab one item.
-async function randomReleaseSearch(baseParams, excludeId) {
+async function randomReleaseSearch(baseParams, excludeId, signal) {
   const probeParams = { ...baseParams, per_page: "1", page: "1" };
-  const probe = await discogsFetch(probeParams);
+  const probe = await discogsFetch(probeParams, signal);
   const totalItems = probe?.pagination?.items || 0;
   if (totalItems === 0) return null;
 
@@ -188,12 +192,12 @@ async function randomReleaseSearch(baseParams, excludeId) {
   const targetPage = 1 + Math.floor(Math.random() * totalPages);
 
   const pageParams = { ...baseParams, per_page: String(perPage), page: String(targetPage) };
-  const pageData = await discogsFetch(pageParams);
+  const pageData = await discogsFetch(pageParams, signal);
   let items = (pageData.results || []).filter((r) => r.type === "release" || !r.type);
   if (excludeId) items = items.filter((r) => r.id !== excludeId);
   if (items.length === 0) return null;
 
-  return items[Math.floor(Math.random() * items.length)];
+  return shuffle(items)[0];
 }
 
 export default function App() {
@@ -237,6 +241,7 @@ function DiscoverTab() {
   const [country, setCountry] = useState("Any Country");
   const [formats, setFormats] = useState(["Vinyl"]); // empty array = any format
   const [minRating, setMinRating] = useState(0); // 0 = no rating filter
+  const [onlyArtwork, setOnlyArtwork] = useState(true);
 
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
@@ -247,6 +252,7 @@ function DiscoverTab() {
 
   const formRef = useRef(null);
   const resultRef = useRef(null);
+  const requestRef = useRef(null);
 
   const styleOptions = useMemo(() => GENRE_STYLES[genre] || [], [genre]);
 
@@ -277,6 +283,9 @@ function DiscoverTab() {
   }
 
   async function findRelease() {
+    requestRef.current?.abort();
+    const controller = new AbortController();
+    requestRef.current = controller;
     setLoading(true);
     setError("");
     setEmptyNotice("");
@@ -301,7 +310,7 @@ function DiscoverTab() {
 
         let pick;
         try {
-          pick = await randomReleaseSearch(baseParams);
+          pick = await randomReleaseSearch(baseParams, null, controller.signal);
         } catch (e) {
           if (String(e?.message || "").includes("rate-limiting")) await sleep(1200);
           continue; // transient hiccup on the search itself — retry rather than failing outright
@@ -315,11 +324,12 @@ function DiscoverTab() {
           if (!matches) continue;
         }
 
-        if (needsRatingCheck) {
+        if (needsRatingCheck || onlyArtwork) {
           try {
-            const full = await discogsFetchDetail(pick.resource_url);
+            const full = await discogsFetchDetail(pick.resource_url, controller.signal);
             const rating = full.community?.rating;
-            if (!rating || rating.count === 0 || rating.average < minRating) continue;
+            if (onlyArtwork && !full.images?.some((image) => image.uri || image.uri150)) continue;
+            if (needsRatingCheck && (!rating || rating.count === 0 || rating.average < minRating)) continue;
             found = pick;
             foundDetail = full;
             break;
@@ -332,6 +342,7 @@ function DiscoverTab() {
         }
       }
 
+      if (controller.signal.aborted) return;
       if (!found) {
         setEmptyNotice(
           anyResultsAtAll
@@ -453,6 +464,11 @@ function DiscoverTab() {
             </p>
           )}
         </div>
+
+        <label style={styles.checkboxRow}>
+          <input type="checkbox" checked={onlyArtwork} onChange={(e) => setOnlyArtwork(e.target.checked)} />
+          Only show releases with artwork
+        </label>
 
         <button style={styles.button} onClick={findRelease} disabled={loading}>
           {loading ? "Digging…" : "Find something"}
