@@ -261,21 +261,46 @@ async function discogsFetchDetail(resourceUrl, signal) {
   return detail;
 }
 
-// Shared random-pick engine: probe for total matches, jump to a random page, grab one item.
-async function randomReleaseSearch(baseParams, excludedIds = new Set(), signal) {
-  const probeParams = { ...baseParams, per_page: "1", page: "1" };
-  const probe = await discogsFetch(probeParams, signal);
-  const totalItems = probe?.pagination?.items || 0;
-  if (totalItems === 0) return null;
+// Callers pass exclusions in whatever shape is convenient — a Set of seen ids, a single id,
+// or nothing at all. Normalizing here means a bare id or a null can't blow up the filter below.
+function toIdSet(excluded) {
+  if (excluded instanceof Set) return excluded;
+  if (Array.isArray(excluded)) return new Set(excluded.filter((v) => v != null));
+  if (excluded == null) return new Set();
+  return new Set([excluded]);
+}
 
-  const perPage = 50;
-  const totalPages = Math.min(Math.ceil(totalItems / perPage), 400);
-  const pageNumbers = Array.from({ length: Math.min(3, totalPages) }, () => 1 + Math.floor(Math.random() * totalPages));
-  const pages = await Promise.all(pageNumbers.map((page) =>
-    discogsFetch({ ...baseParams, per_page: String(perPage), page: String(page) }, signal)
-  ));
-  let items = pages.flatMap((page) => page.results || []).filter((r) =>
-    (r.type === "release" || !r.type) && !excludedIds.has(r.id) && !excludedIds.has(r.master_id)
+// Discogs stops serving search results somewhere around the 10,000th item, so there's no
+// point rolling a page number beyond that — deep pages just error or come back empty.
+const SEARCH_PER_PAGE = 100; // Discogs' max
+const MAX_SAMPLE_PAGES = 100; // 100 × 100 = the ~10k ceiling
+
+// Shared random-pick engine: read the match count off page one, jump to a random page,
+// grab one item. Page one doubles as the count probe so a draw costs 1–2 calls, not 4.
+async function randomReleaseSearch(baseParams, excluded, signal) {
+  const excludedIds = toIdSet(excluded);
+  const pageParams = { ...baseParams, per_page: String(SEARCH_PER_PAGE) };
+
+  const firstPage = await discogsFetch({ ...pageParams, page: "1" }, signal);
+  if (!firstPage?.pagination?.items) return null;
+
+  const totalPages = Math.min(firstPage.pagination.pages || 1, MAX_SAMPLE_PAGES);
+  let response = firstPage;
+
+  if (totalPages > 1) {
+    const page = 1 + Math.floor(Math.random() * totalPages);
+    if (page !== 1) {
+      try {
+        response = await discogsFetch({ ...pageParams, page: String(page) }, signal);
+      } catch (e) {
+        if (e.name === "AbortError") throw e;
+        response = firstPage; // deep page hiccuped — fall back to what we already have
+      }
+    }
+  }
+
+  const items = (response.results || []).filter((r) =>
+    (r.type === "release" || !r.type) && !excludedIds.has(r.id) && !(r.master_id && excludedIds.has(r.master_id))
   );
   if (items.length === 0) return null;
 
@@ -296,8 +321,14 @@ export default function App() {
           from { filter: blur(10px); opacity: 0.4; }
           to { filter: blur(0); opacity: 1; }
         }
+        @keyframes discoverySpin {
+          to { transform: rotate(360deg); }
+        }
         .discovery-cover-reveal {
           animation: discoveryImageSharpen 0.4s ease;
+        }
+        @media (prefers-reduced-motion: reduce) {
+          .discovery-cover-reveal { animation: none; }
         }
       `}</style>
       <div style={styles.container}>
@@ -349,19 +380,37 @@ function DiscoverTab() {
 
   const formRef = useRef(null);
   const resultRef = useRef(null);
+  const statusRef = useRef(null);
   const requestRef = useRef(null);
   const seenIdsRef = useRef(new Set());
   const weirderCeilingRef = useRef(null);
 
   const styleOptions = useMemo(() => GENRE_STYLES[genre] || [], [genre]);
 
-  // Once a result lands, bring the card to the top of the viewport — handy on mobile where
+  // The discovery-mode buttons sit below the card, so a press from down there would
+  // otherwise kick off a search with no visible sign anything is happening. Ride up to the
+  // dig banner the moment a search starts…
+  useEffect(() => {
+    if (loading) {
+      statusRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
+    }
+  }, [loading]);
+
+  // …then back down to the card once a result lands. Also handy on mobile generally, where
   // the filter form pushes the card below the fold.
   useEffect(() => {
     if (result && resultRef.current) {
       resultRef.current.scrollIntoView({ behavior: "smooth", block: "start" });
     }
   }, [result]);
+
+  // A dig that comes back empty or errors is still an answer — make sure it's on screen
+  // rather than leaving the person parked at the bottom wondering what happened.
+  useEffect(() => {
+    if ((error || emptyNotice) && statusRef.current) {
+      statusRef.current.scrollIntoView({ behavior: "smooth", block: "center" });
+    }
+  }, [error, emptyNotice]);
 
   function scrollToFilters() {
     formRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
@@ -525,14 +574,17 @@ function DiscoverTab() {
   // "Another Like This" — same genre, same decade as the current result, different artist.
   function handleAnotherLikeThis() {
     const g = primaryGenre();
-    if (!g || !result?.year) return;
-    const decadeLabel = `${Math.floor(result.year / 10) * 10}s`;
+    if (!g) return;
+    // Search results don't always carry a year, and the detail object sometimes does.
+    // Without one we just drop the decade pin rather than leaving the button inert.
+    const year = Number(result?.year || detail?.year) || null;
+    const decadeLabel = year ? `${Math.floor(year / 10) * 10}s` : null;
     const excludeArtistIds = new Set((detail?.artists || []).map((a) => a.id));
     weirderCeilingRef.current = null;
-    setModeNotice(`Looking for more ${g}, ${decadeLabel}…`);
+    setModeNotice(decadeLabel ? `Looking for more ${g}, ${decadeLabel}…` : `Looking for more ${g}…`);
     findRelease({
       genreOverride: g,
-      decadeOverride: decadeLabel,
+      decadeOverride: decadeLabel || undefined,
       syncForm: true,
       label: "Finding something in the same vein…",
       extraCheck: excludeArtistIds.size
@@ -545,13 +597,12 @@ function DiscoverTab() {
   // the results drift toward more obscure territory. Not literal artist-similarity (Discogs
   // has no such API) — just progressively less-collected releases in the same genre.
   async function handleWeirder() {
-    const g = primaryGenre();
-    if (!g) return;
+    const g = primaryGenre(); // may be null — then we just don't pin the genre
     const baseline = weirderCeilingRef.current ?? detail?.community?.have ?? null;
     const ceiling = baseline != null ? Math.max(baseline - 1, 0) : null;
     setModeNotice(ceiling != null ? `Digging weirder (under ${ceiling} haves)…` : "Digging weirder…");
     const res = await findRelease({
-      genreOverride: g,
+      genreOverride: g || undefined,
       label: "Digging weirder…",
       extraCheck: ceiling != null ? (full) => (full.community?.have ?? Infinity) < ceiling : undefined,
     });
@@ -674,11 +725,19 @@ function DiscoverTab() {
         </button>
       </div>
 
-      {error && <div style={styles.errorBox}>{error}</div>}
-      {emptyNotice && <div style={styles.emptyBox}>{emptyNotice}</div>}
+      <div ref={statusRef}>
+        {loading && (
+          <div style={styles.digBox}>
+            <span style={styles.digSpinner} aria-hidden="true" />
+            <span>{loadingLabel}</span>
+          </div>
+        )}
+        {!loading && error && <div style={styles.errorBox}>{error}</div>}
+        {!loading && emptyNotice && <div style={styles.emptyBox}>{emptyNotice}</div>}
+      </div>
 
       {result && (
-        <div style={styles.card} ref={resultRef}>
+        <div style={{ ...styles.card, ...(loading ? styles.cardDimmed : {}) }} ref={resultRef}>
           <SmartImage
             src={coverSrc}
             alt={title}
@@ -762,19 +821,19 @@ function DiscoverTab() {
 
       {hasResultContext ? (
         <div style={styles.discoveryModeRow}>
-          <button style={styles.modeButton} onClick={handleAnotherLikeThis} disabled={loading}>
+          <button style={{ ...styles.modeButton, ...(loading ? styles.modeButtonDisabled : {}) }} onClick={handleAnotherLikeThis} disabled={loading}>
             🔁 Another like this
           </button>
-          <button style={styles.modeButton} onClick={handleWeirder} disabled={loading}>
+          <button style={{ ...styles.modeButton, ...(loading ? styles.modeButtonDisabled : {}) }} onClick={handleWeirder} disabled={loading}>
             🌀 Obscurer
           </button>
-          <button style={styles.modeButton} onClick={handleHiddenGem} disabled={loading}>
+          <button style={{ ...styles.modeButton, ...(loading ? styles.modeButtonDisabled : {}) }} onClick={handleHiddenGem} disabled={loading}>
             💎 Hidden gem
           </button>
         </div>
       ) : (
         <div style={styles.discoveryModeRow}>
-          <button style={styles.modeButton} onClick={handleHiddenGem} disabled={loading}>
+          <button style={{ ...styles.modeButton, ...(loading ? styles.modeButtonDisabled : {}) }} onClick={handleHiddenGem} disabled={loading}>
             💎 Hidden gem
           </button>
         </div>
@@ -854,16 +913,30 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function drawValidRelease(statKey, excludeId, attempts = 5) {
-  for (let i = 0; i < attempts; i++) {
-    if (i > 0) await sleep(150); // small gap between attempts eases pressure on the unauthenticated rate limit
+// Randomizing the pressing year alongside the genre shrinks each search below Discogs'
+// paging ceiling, so the draw samples the whole catalogue rather than the first 10k rows
+// of its default ranking.
+function randomGameYear() {
+  return 1955 + Math.floor(Math.random() * 69);
+}
+
+async function drawValidRelease(statKey, excludeId, attempts) {
+  // Plenty of obscure vinyl has no active listings, so price needs more swings to land one.
+  const maxAttempts = attempts ?? (statKey === "price" ? 8 : 6);
+  const excluded = toIdSet(excludeId);
+
+  for (let i = 0; i < maxAttempts; i++) {
+    if (i > 0) await sleep(150); // small gap between attempts eases pressure on the rate limit
     try {
       // A fully unfiltered vinyl search has tens of millions of matches, far more than our
       // page cap can meaningfully sample, so it ends up skewed toward whatever Discogs'
       // default ranking favors (heavily Electronic). Picking a random genre first and
       // searching within it keeps each genre's odds even instead.
       const genre = GAME_GENRES[Math.floor(Math.random() * GAME_GENRES.length)];
-      const pick = await randomReleaseSearch({ type: "release", format: "Vinyl", genre }, excludeId);
+      const pick = await randomReleaseSearch(
+        { type: "release", format: "Vinyl", genre, year: String(randomGameYear()) },
+        excluded
+      );
       if (!pick) continue;
       const detail = await discogsFetchDetail(pick.resource_url);
       const value = getStatValue(detail, statKey);
@@ -891,24 +964,33 @@ function HigherLowerGame() {
   const [error, setError] = useState("");
 
   const statMeta = STAT_OPTIONS.find((s) => s.key === statKey);
+  const runIdRef = useRef(0);
 
   const startNewRound = useCallback(async (key) => {
+    const runId = ++runIdRef.current;
     setLoading(true);
     setError("");
     setRevealed(false);
     setLastCorrect(null);
     setScore(0);
+    // Old cards hold values measured against the previous stat — clearing them stops a
+    // stale pairing from sitting under a mismatched label while the new draw runs.
+    setChampion(null);
+    setChallenger(null);
     try {
       const first = await drawValidRelease(key, null);
+      if (runIdRef.current !== runId) return; // a newer round took over
       if (!first) throw new Error("Couldn't find a release... Try waiting a second or just refreshing. Discogs is probably on a bathroom break.");
       const second = await drawValidRelease(key, first.pick.id);
+      if (runIdRef.current !== runId) return;
       if (!second) throw new Error("Couldn't find a second release with that stat available so try refreshing. Discogs likes to throw fits like this.");
       setChampion(first);
       setChallenger(second);
     } catch (e) {
+      if (runIdRef.current !== runId) return;
       setError(e.message || "Something went wrong. Likely because of Discogs... try again in a few seconds.");
     } finally {
-      setLoading(false);
+      if (runIdRef.current === runId) setLoading(false);
     }
   }, []);
 
@@ -1083,17 +1165,32 @@ function buildStyleOptions(round) {
   return shuffle([...actual, ...pool.slice(0, decoyCount)]);
 }
 
-async function drawGenreRound(excludeId, attempts = 5) {
+async function drawGenreRound(excludeId, attempts = 6) {
+  const excluded = toIdSet(excludeId);
+
   for (let i = 0; i < attempts; i++) {
     if (i > 0) await sleep(150);
     try {
       // Same fix as Higher/Lower: search within a randomly chosen genre each attempt so the
       // draw is spread evenly across genres instead of skewed by Discogs' default ranking.
       const genre = GAME_GENRES[Math.floor(Math.random() * GAME_GENRES.length)];
-      const pick = await randomReleaseSearch({ type: "release", format: "Vinyl", genre }, excludeId);
+      const pick = await randomReleaseSearch(
+        { type: "release", format: "Vinyl", genre, year: String(randomGameYear()) },
+        excluded
+      );
       if (!pick) continue;
-      if (!pick.genre || pick.genre.length === 0) continue;
-      const detail = await discogsFetchDetail(pick.resource_url);
+      // The answer has to be one of the buttons on the grid, or the round is unwinnable.
+      if (!(pick.genre || []).some((g) => GAME_GENRES.includes(g))) continue;
+
+      // The search result already carries genre, style and a cover, so the detail lookup is
+      // only an upgrade (full-res image carousel). Don't burn an attempt when it 404s.
+      let detail = null;
+      try {
+        detail = await discogsFetchDetail(pick.resource_url);
+      } catch (e) {
+        if (e.name === "AbortError") throw e;
+      }
+      if (!detail?.images?.length && !pick.cover_image) continue; // nothing to show, no round
       return { pick, detail };
     } catch (e) {
       if (String(e?.message || "").includes("rate-limiting")) await sleep(1200);
@@ -1115,7 +1212,10 @@ function GuessGenreGame() {
   const [error, setError] = useState("");
   const [imageIndex, setImageIndex] = useState(0);
 
+  const runIdRef = useRef(0);
+
   const startRound = useCallback(async (excludeId) => {
+    const runId = ++runIdRef.current;
     setLoading(true);
     setError("");
     setPhase("guessing");
@@ -1125,12 +1225,14 @@ function GuessGenreGame() {
     setImageIndex(0);
     try {
       const next = await drawGenreRound(excludeId);
+      if (runIdRef.current !== runId) return; // a newer round took over
       if (!next) throw new Error("Couldn't pull a fresh release right now. Try again in a moment. Most likely Discogs is just being lazy.");
       setRound(next);
     } catch (e) {
+      if (runIdRef.current !== runId) return;
       setError(e.message || "Something went wrong. And by something, I mean Discogs... it's sooo lazy. Try refreshing.");
     } finally {
-      setLoading(false);
+      if (runIdRef.current === runId) setLoading(false);
     }
   }, []);
 
@@ -1381,6 +1483,31 @@ const styles = {
     color: PALETTE.danger,
     fontSize: 14,
   },
+  digBox: {
+    marginTop: 16,
+    padding: "14px 14px",
+    borderRadius: 8,
+    background: PALETTE.card,
+    border: `1px solid ${PALETTE.borderStrong}`,
+    color: PALETTE.muted,
+    fontSize: 14,
+    fontWeight: 600,
+    display: "flex",
+    alignItems: "center",
+    gap: 10,
+  },
+  digSpinner: {
+    width: 15,
+    height: 15,
+    borderRadius: "50%",
+    border: `2px solid ${PALETTE.border}`,
+    borderTopColor: PALETTE.accent,
+    display: "inline-block",
+    flexShrink: 0,
+    animation: "discoverySpin 0.7s linear infinite",
+  },
+  cardDimmed: { opacity: 0.4, transition: "opacity 0.2s ease" },
+  modeButtonDisabled: { opacity: 0.5, cursor: "default" },
   emptyBox: {
     marginTop: 16,
     padding: 12,
