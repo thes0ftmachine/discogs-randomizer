@@ -144,8 +144,89 @@ const COUNTRIES = [
 // more than one, we broaden the query and filter candidates client-side instead.
 const FORMAT_OPTIONS = ["Vinyl", "LP", "CD", "Cassette", "7\"", "10\"", "12\"", "Box Set"];
 
+// Warm-neutral palette — leans toward "flipping through record bins" rather than a
+// generic utilitarian gray/white/black app.
+const PALETTE = {
+  bg: "#F5F3EE",
+  card: "#FFFFFF",
+  border: "#DDD8CE",
+  borderStrong: "#C9C2B2",
+  primary: "#222222",
+  muted: "#75705F",
+  mutedLight: "#948E7C",
+  accent: "#598396",
+  accentDark: "#2754a8",
+  success: "#4E8B5D",
+  danger: "#B3402E",
+  warn: "#8A6A1F",
+};
+
+// Discogs' image CDN occasionally 404s on an otherwise valid URL. Rather than giving up
+// immediately, retry the same URL once (with a cache-busting param) before falling back to
+// a placeholder — smooths over what's usually just a transient hiccup.
+function SmartImage({ src, alt, style, placeholderStyle, placeholderText = "No image" }) {
+  const [attempt, setAttempt] = useState(0);
+  const [failed, setFailed] = useState(false);
+
+  useEffect(() => {
+    setAttempt(0);
+    setFailed(false);
+  }, [src]);
+
+  if (!src || failed) {
+    return <div style={{ ...style, ...placeholderStyle }}>{!src ? placeholderText : "Image unavailable"}</div>;
+  }
+
+  const effectiveSrc = attempt === 0 ? src : src + (src.includes("?") ? "&" : "?") + "retry=" + attempt;
+
+  return (
+    <img
+      key={effectiveSrc}
+      className="discovery-cover-reveal"
+      src={effectiveSrc}
+      alt={alt}
+      style={style}
+      onError={() => {
+        if (attempt < 1) {
+          setTimeout(() => setAttempt((a) => a + 1), 400);
+        } else {
+          setFailed(true);
+        }
+      }}
+    />
+  );
+}
+
 // token should allow more api calls per minute
 const detailCache = new Map();
+
+// Decorative loading copy — the "fake number is fine as long as it reads as decorative"
+// idea, mixed with plain honest copy so it doesn't feel gimmicky every single time.
+const DIG_MESSAGES = [
+  "Digging through crates…",
+  "Digging…",
+  "Flipping through the stacks…",
+  "Searching a few million releases…",
+  "Blowing the dust off a sleeve…",
+];
+
+// Discogs' search result "title" field is "Artist - Title" combined; the full release
+// detail has clean separate fields. Prefer the clean version, fall back to a best-effort
+// split on the first " - " (imperfect for titles that contain " - " themselves).
+function splitArtistTitle(result, detail) {
+  if (detail?.title && detail?.artists?.length) {
+    return { artist: detail.artists.map((a) => a.name).join(", "), title: detail.title };
+  }
+  const raw = result?.title || "";
+  const idx = raw.indexOf(" - ");
+  if (idx === -1) return { artist: "", title: raw };
+  return { artist: raw.slice(0, idx), title: raw.slice(idx + 3) };
+}
+
+function renderStars(average) {
+  const rounded = Math.round(average);
+  return "★".repeat(Math.max(0, Math.min(5, rounded))) + "☆".repeat(Math.max(0, 5 - rounded));
+}
 
 function randomYearInDecade(decade) {
   if (decade === "Any Decade") return null;
@@ -181,7 +262,7 @@ async function discogsFetchDetail(resourceUrl, signal) {
 }
 
 // Shared random-pick engine: probe for total matches, jump to a random page, grab one item.
-async function randomReleaseSearch(baseParams, excludeId, signal) {
+async function randomReleaseSearch(baseParams, excludedIds = new Set(), signal) {
   const probeParams = { ...baseParams, per_page: "1", page: "1" };
   const probe = await discogsFetch(probeParams, signal);
   const totalItems = probe?.pagination?.items || 0;
@@ -189,12 +270,13 @@ async function randomReleaseSearch(baseParams, excludeId, signal) {
 
   const perPage = 50;
   const totalPages = Math.min(Math.ceil(totalItems / perPage), 400);
-  const targetPage = 1 + Math.floor(Math.random() * totalPages);
-
-  const pageParams = { ...baseParams, per_page: String(perPage), page: String(targetPage) };
-  const pageData = await discogsFetch(pageParams, signal);
-  let items = (pageData.results || []).filter((r) => r.type === "release" || !r.type);
-  if (excludeId) items = items.filter((r) => r.id !== excludeId);
+  const pageNumbers = Array.from({ length: Math.min(3, totalPages) }, () => 1 + Math.floor(Math.random() * totalPages));
+  const pages = await Promise.all(pageNumbers.map((page) =>
+    discogsFetch({ ...baseParams, per_page: String(perPage), page: String(page) }, signal)
+  ));
+  let items = pages.flatMap((page) => page.results || []).filter((r) =>
+    (r.type === "release" || !r.type) && !excludedIds.has(r.id) && !excludedIds.has(r.master_id)
+  );
   if (items.length === 0) return null;
 
   return shuffle(items)[0];
@@ -205,6 +287,19 @@ export default function App() {
 
   return (
     <div style={styles.page}>
+      <style>{`
+        @keyframes discoveryFadeIn {
+          from { opacity: 0; transform: translateY(6px); }
+          to { opacity: 1; transform: translateY(0); }
+        }
+        @keyframes discoveryImageSharpen {
+          from { filter: blur(10px); opacity: 0.4; }
+          to { filter: blur(0); opacity: 1; }
+        }
+        .discovery-cover-reveal {
+          animation: discoveryImageSharpen 0.4s ease;
+        }
+      `}</style>
       <div style={styles.container}>
         <header style={styles.header}>
           <h1 style={styles.title}>Random Discovery</h1>
@@ -244,15 +339,19 @@ function DiscoverTab() {
   const [onlyArtwork, setOnlyArtwork] = useState(true);
 
   const [loading, setLoading] = useState(false);
+  const [loadingLabel, setLoadingLabel] = useState("Digging…");
   const [error, setError] = useState("");
   const [result, setResult] = useState(null);
   const [detail, setDetail] = useState(null);
   const [emptyNotice, setEmptyNotice] = useState("");
   const [history, setHistory] = useState([]);
+  const [modeNotice, setModeNotice] = useState("");
 
   const formRef = useRef(null);
   const resultRef = useRef(null);
   const requestRef = useRef(null);
+  const seenIdsRef = useRef(new Set());
+  const weirderCeilingRef = useRef(null);
 
   const styleOptions = useMemo(() => GENRE_STYLES[genre] || [], [genre]);
 
@@ -282,24 +381,25 @@ function DiscoverTab() {
     return params;
   }
 
-  async function findRelease() {
+  // Generalized search — the normal "Find something" button calls this with no overrides;
+  // the discovery-mode buttons (Rabbit Hole, Hidden Gem, Another Like This, Weirder) call it
+  // with a genre/style/decade pinned to the current result and/or an extraCheck predicate
+  // evaluated against the full release detail.
+  async function findRelease(opts = {}) {
+    const { genreOverride, styleOverride, decadeOverride, extraCheck, syncForm = false, label } = opts;
     requestRef.current?.abort();
     const controller = new AbortController();
     requestRef.current = controller;
     setLoading(true);
+    setLoadingLabel(label || DIG_MESSAGES[Math.floor(Math.random() * DIG_MESSAGES.length)]);
     setError("");
     setEmptyNotice("");
-    setResult(null);
-    setDetail(null);
+    setModeNotice("");
     try {
-      const year = randomYearInDecade(decade);
-      const baseParams = buildParams(year);
       const needsClientFormatCheck = formats.length > 1;
       const needsRatingCheck = minRating > 0;
-      // Even with no extra filters, give it a few attempts — Discogs' search endpoint
-      // occasionally throws a transient 404/429 on an otherwise valid request, and a single
-      // hiccup shouldn't kill the whole search.
-      const maxAttempts = needsClientFormatCheck || needsRatingCheck ? 10 : 4;
+      const needsDetailForSelection = needsRatingCheck || onlyArtwork || !!extraCheck;
+      const maxAttempts = 10;
 
       let found = null;
       let foundDetail = null;
@@ -307,11 +407,19 @@ function DiscoverTab() {
 
       for (let i = 0; i < maxAttempts; i++) {
         if (i > 0) await sleep(150);
+        const yearForAttempt = randomYearInDecade(decadeOverride || decade);
+        const baseParams = buildParams(yearForAttempt);
+        if (genreOverride) baseParams.genre = genreOverride;
+        if (styleOverride !== undefined) {
+          if (styleOverride) baseParams.style = styleOverride;
+          else delete baseParams.style;
+        }
 
         let pick;
         try {
-          pick = await randomReleaseSearch(baseParams, null, controller.signal);
+          pick = await randomReleaseSearch(baseParams, seenIdsRef.current, controller.signal);
         } catch (e) {
+          if (e.name === "AbortError") return;
           if (String(e?.message || "").includes("rate-limiting")) await sleep(1200);
           continue; // transient hiccup on the search itself — retry rather than failing outright
         }
@@ -324,16 +432,18 @@ function DiscoverTab() {
           if (!matches) continue;
         }
 
-        if (needsRatingCheck || onlyArtwork) {
+        if (needsDetailForSelection) {
           try {
             const full = await discogsFetchDetail(pick.resource_url, controller.signal);
             const rating = full.community?.rating;
             if (onlyArtwork && !full.images?.some((image) => image.uri || image.uri150)) continue;
             if (needsRatingCheck && (!rating || rating.count === 0 || rating.average < minRating)) continue;
+            if (extraCheck && !extraCheck(full, pick)) continue;
             found = pick;
             foundDetail = full;
             break;
-          } catch {
+          } catch (e) {
+            if (e.name === "AbortError") return;
             continue;
           }
         } else {
@@ -346,38 +456,120 @@ function DiscoverTab() {
       if (!found) {
         setEmptyNotice(
           anyResultsAtAll
-            ? "Found matches for genre/style/decade/country, but couldn't find one that also cleared the format or rating filter after several tries. Try loosening the rating minimum or format selection."
+            ? "Found matches, but couldn't find one that also cleared the extra filters after several tries. Try loosening things a bit."
             : "Nothing matched that combination. Try loosening a filter — style and country are the most restrictive."
         );
         setLoading(false);
-        return;
+        return null;
+      }
+
+      if (syncForm) {
+        if (genreOverride) setGenre(genreOverride);
+        if (styleOverride !== undefined) setStyle(styleOverride || "");
       }
 
       setResult(found);
+      seenIdsRef.current.add(found.id);
+      if (found.master_id) seenIdsRef.current.add(found.master_id);
       setHistory((h) => [found, ...h].slice(0, 6));
       setLoading(false);
 
-      if (foundDetail) {
-        setDetail(foundDetail);
+      let finalDetail = foundDetail;
+      if (finalDetail) {
+        setDetail(finalDetail);
       } else if (found.resource_url) {
         try {
-          const full = await discogsFetchDetail(found.resource_url);
-          setDetail(full);
+          finalDetail = await discogsFetchDetail(found.resource_url);
+          setDetail(finalDetail);
         } catch {
           // Non-fatal — card still renders with the search result's fallback fields.
         }
       }
+
+      return { pick: found, detail: finalDetail };
     } catch (e) {
       setError(e.message || "Something went wrong. Don't blame me. It's more than likely Discogs. Try again in a second.");
       setLoading(false);
+      return null;
+    }
+  }
+
+  function primaryGenre() {
+    return detail?.genres?.[0] || result?.genre?.[0] || null;
+  }
+
+  // "Rabbit Hole" — click a style chip on the current result to drill straight into that
+  // genre + style combination instead of going back to the form.
+  function handleRabbitHole(clickedStyle) {
+    const g = primaryGenre();
+    if (!g) return;
+    weirderCeilingRef.current = null;
+    setModeNotice(`Down the rabbit hole: ${g} → ${clickedStyle}`);
+    findRelease({ genreOverride: g, styleOverride: clickedStyle, syncForm: true, label: "Falling down the rabbit hole…" });
+  }
+
+  // "Hidden Gem" — well-loved but rarely owned: rating > 4.2 with fewer than 100 haves.
+  function handleHiddenGem() {
+    weirderCeilingRef.current = null;
+    setModeNotice("Hunting for a hidden gem (rating > 4.2, under 100 haves)…");
+    findRelease({
+      label: "Hunting for a hidden gem…",
+      extraCheck: (full) => {
+        const r = full.community?.rating;
+        const have = full.community?.have;
+        return !!r && r.count > 0 && r.average > 4.2 && typeof have === "number" && have < 100;
+      },
+    });
+  }
+
+  // "Another Like This" — same genre, same decade as the current result, different artist.
+  function handleAnotherLikeThis() {
+    const g = primaryGenre();
+    if (!g || !result?.year) return;
+    const decadeLabel = `${Math.floor(result.year / 10) * 10}s`;
+    const excludeArtistIds = new Set((detail?.artists || []).map((a) => a.id));
+    weirderCeilingRef.current = null;
+    setModeNotice(`Looking for more ${g}, ${decadeLabel}…`);
+    findRelease({
+      genreOverride: g,
+      decadeOverride: decadeLabel,
+      syncForm: true,
+      label: "Finding something in the same vein…",
+      extraCheck: excludeArtistIds.size
+        ? (full) => !(full.artists || []).some((a) => excludeArtistIds.has(a.id))
+        : undefined,
+    });
+  }
+
+  // "Weirder" — each press ratchets the have-count ceiling down within the same genre, so
+  // the results drift toward more obscure territory. Not literal artist-similarity (Discogs
+  // has no such API) — just progressively less-collected releases in the same genre.
+  async function handleWeirder() {
+    const g = primaryGenre();
+    if (!g) return;
+    const baseline = weirderCeilingRef.current ?? detail?.community?.have ?? null;
+    const ceiling = baseline != null ? Math.max(baseline - 1, 0) : null;
+    setModeNotice(ceiling != null ? `Digging weirder (under ${ceiling} haves)…` : "Digging weirder…");
+    const res = await findRelease({
+      genreOverride: g,
+      label: "Digging weirder…",
+      extraCheck: ceiling != null ? (full) => (full.community?.have ?? Infinity) < ceiling : undefined,
+    });
+    if (res?.detail?.community?.have != null) {
+      weirderCeilingRef.current = res.detail.community.have;
     }
   }
 
   const coverSrc = detail?.images?.[0]?.uri || detail?.images?.[0]?.uri150 || result?.cover_image || null;
+  const { artist, title } = splitArtistTitle(result, detail);
+  const ratingInfo = detail?.community?.rating;
+  const hasResultContext = !!result;
 
   return (
     <>
       <div style={styles.form} ref={formRef}>
+        <p style={styles.formHeading}>Find me…</p>
+
         <div style={styles.fieldRow}>
           <label style={styles.label}>Genre</label>
           <select
@@ -406,11 +598,18 @@ function DiscoverTab() {
 
         <div style={styles.fieldRow}>
           <label style={styles.label}>Decade</label>
-          <select style={styles.select} value={decade} onChange={(e) => setDecade(e.target.value)}>
+          <div style={styles.chipRow}>
             {DECADES.map((d) => (
-              <option key={d} value={d}>{d}</option>
+              <button
+                type="button"
+                key={d}
+                style={{ ...styles.chip, ...(decade === d ? styles.chipActive : {}) }}
+                onClick={() => setDecade(d)}
+              >
+                {d === "Any Decade" ? "Any" : d}
+              </button>
             ))}
-          </select>
+          </div>
         </div>
 
         <div style={styles.fieldRow}>
@@ -470,8 +669,8 @@ function DiscoverTab() {
           Only show releases with artwork
         </label>
 
-        <button style={styles.button} onClick={findRelease} disabled={loading}>
-          {loading ? "Digging…" : "Find something"}
+        <button style={styles.button} onClick={() => findRelease()} disabled={loading}>
+          {loading ? loadingLabel : "Find something"}
         </button>
       </div>
 
@@ -480,31 +679,61 @@ function DiscoverTab() {
 
       {result && (
         <div style={styles.card} ref={resultRef}>
-          {coverSrc ? (
-            <img src={coverSrc} alt={result.title} style={styles.cover} />
-          ) : (
-            <div style={{ ...styles.cover, ...styles.coverPlaceholder }}>No image</div>
-          )}
+          <SmartImage
+            src={coverSrc}
+            alt={title}
+            style={styles.cover}
+            placeholderStyle={styles.coverPlaceholder}
+          />
           <div style={styles.cardBody}>
-            <h2 style={styles.cardTitle}>{result.title}</h2>
-            <div style={styles.metaRow}>
-              {result.year ? <span style={styles.tag}>{result.year}</span> : null}
-              {result.country ? <span style={styles.tag}>{result.country}</span> : null}
-              {(result.format || []).slice(0, 3).map((f) => (
-                <span style={styles.tag} key={f}>{f}</span>
-              ))}
-            </div>
-            {result.label && result.label.length > 0 && (
-              <p style={styles.metaLine}><strong>Label:</strong> {result.label.join(", ")}</p>
+            <h2 style={styles.cardTitle}>{title}</h2>
+            {artist && <p style={styles.cardArtist}>{artist}</p>}
+
+            <p style={styles.cardSubline}>
+              {[result.year, result.country].filter(Boolean).join(" • ")}
+            </p>
+
+            {(detail?.genres || result.genre || []).length > 0 && (
+              <div style={styles.metaRow}>
+                {(detail?.genres || result.genre).map((g) => (
+                  <span style={styles.genreTag} key={g}>{g}</span>
+                ))}
+                {(result.format || []).slice(0, 2).map((f) => (
+                  <span style={styles.tag} key={f}>{f}</span>
+                ))}
+              </div>
             )}
+
             {result.style && result.style.length > 0 && (
-              <p style={styles.metaLine}><strong>Style:</strong> {result.style.join(", ")}</p>
+              <div style={styles.styleChipRow}>
+                {result.style.map((s) => (
+                  <button
+                    key={s}
+                    type="button"
+                    style={styles.styleChip}
+                    onClick={() => handleRabbitHole(s)}
+                    disabled={loading}
+                    title="Rabbit hole: search this genre + style"
+                  >
+                    🐇 {s}
+                  </button>
+                ))}
+              </div>
             )}
-            {result.community && (
+
+            {ratingInfo && ratingInfo.count > 0 && (
               <p style={styles.metaLine}>
-                <strong>Discogs community:</strong> {result.community.have ?? 0} have it, {result.community.want ?? 0} want it
+                <span style={styles.stars}>{renderStars(ratingInfo.average)}</span>{" "}
+                <span style={styles.hintText}>{ratingInfo.average.toFixed(2)} ({ratingInfo.count} ratings)</span>
               </p>
             )}
+
+            {result.community && (
+              <p style={styles.metaLine}>
+                ❤ {result.community.have ?? 0} have it &nbsp;·&nbsp; ☆ {result.community.want ?? 0} want it
+              </p>
+            )}
+
             {detail && (detail.lowest_price != null || detail.num_for_sale != null) && (
               <p style={styles.metaLine}>
                 <strong>Marketplace:</strong>{" "}
@@ -512,6 +741,11 @@ function DiscoverTab() {
                 {detail.num_for_sale != null ? ` · ${detail.num_for_sale} for sale` : ""}
               </p>
             )}
+
+            {result.label && result.label.length > 0 && (
+              <p style={styles.metaLine}><strong>Label:</strong> {result.label.join(", ")}</p>
+            )}
+
             <a
               href={"https://www.discogs.com" + (result.uri || "")}
               target="_blank"
@@ -521,6 +755,28 @@ function DiscoverTab() {
               View on Discogs →
             </a>
           </div>
+        </div>
+      )}
+
+      {modeNotice && <p style={styles.modeNotice}>{modeNotice}</p>}
+
+      {hasResultContext ? (
+        <div style={styles.discoveryModeRow}>
+          <button style={styles.modeButton} onClick={handleAnotherLikeThis} disabled={loading}>
+            🔁 Another like this
+          </button>
+          <button style={styles.modeButton} onClick={handleWeirder} disabled={loading}>
+            🌀 Weirder
+          </button>
+          <button style={styles.modeButton} onClick={handleHiddenGem} disabled={loading}>
+            💎 Hidden gem
+          </button>
+        </div>
+      ) : (
+        <div style={styles.discoveryModeRow}>
+          <button style={styles.modeButton} onClick={handleHiddenGem} disabled={loading}>
+            💎 Hidden gem
+          </button>
         </div>
       )}
 
@@ -536,7 +792,7 @@ function DiscoverTab() {
           <div style={styles.historyRow}>
             {history.slice(1).map((h) => (
               <div key={h.id} style={styles.historyItem} title={h.title}>
-                {h.thumb ? <img src={h.thumb} alt={h.title} style={styles.historyThumb} /> : <div style={{ ...styles.historyThumb, background: "#e5e5e5" }} />}
+                {h.thumb ? <img src={h.thumb} alt={h.title} style={styles.historyThumb} /> : <div style={{ ...styles.historyThumb, background: PALETTE.border }} />}
                 <span style={styles.historyLabel}>{h.title}</span>
               </div>
             ))}
@@ -546,6 +802,7 @@ function DiscoverTab() {
     </>
   );
 }
+
 
 // ============================== GAMES TAB ==============================
 
@@ -760,7 +1017,7 @@ function GameCard({ release, statMeta, role, statRevealed, value, resultBanner }
     <div style={styles.gameCard}>
       <span style={styles.roleLabel}>{role}</span>
       {cover ? (
-        <img src={cover} alt={pick.title} style={styles.gameCover} />
+        <img key={cover} className="discovery-cover-reveal" src={cover} alt={pick.title} style={styles.gameCover} />
       ) : (
         <div style={{ ...styles.gameCover, ...styles.coverPlaceholder }}>No image</div>
       )}
@@ -770,7 +1027,7 @@ function GameCard({ release, statMeta, role, statRevealed, value, resultBanner }
           {statRevealed ? statMeta.format(value) : "??? " + statMeta.label}
         </p>
         {resultBanner && (
-          <p style={{ ...styles.resultBanner, color: resultBanner === "Correct!" ? "#1e7d32" : "#b3261e" }}>
+          <p style={{ ...styles.resultBanner, color: resultBanner === "Correct!" ? PALETTE.success : PALETTE.danger }}>
             {resultBanner}
           </p>
         )}
@@ -929,7 +1186,7 @@ function GuessGenreGame() {
         <div style={styles.genreCard}>
           <div style={styles.coverWrap}>
             {cover ? (
-              <img src={cover} alt={phase === "revealed" ? round.pick.title : "Guess the genre"} style={styles.genreCover} />
+              <img key={cover} className="discovery-cover-reveal" src={cover} alt={phase === "revealed" ? round.pick.title : "Guess the genre"} style={styles.genreCover} />
             ) : (
               <div style={{ ...styles.genreCover, ...styles.coverPlaceholder }}>No image</div>
             )}
@@ -976,7 +1233,7 @@ function GuessGenreGame() {
           {phase === "revealed" && (
             <div style={styles.genreRevealBody}>
               <p style={styles.genreRevealTitle}>{round.pick.title}</p>
-              <p style={{ ...styles.genreResultLine, color: genreCorrect ? "#1e7d32" : "#b3261e" }}>
+              <p style={{ ...styles.genreResultLine, color: genreCorrect ? PALETTE.success : PALETTE.danger }}>
                 {genreCorrect ? "✓ Correct!" : `✗ You guessed ${guessedGenre}`}
                 {!genreCorrect && ` — actually ${getGenres(round).join(", ")}`}
               </p>
@@ -999,7 +1256,7 @@ function GuessGenreGame() {
                   <button style={styles.bonusSkip} onClick={() => setBonusStatus("skipped")}>Skip</button>
                 </div>
               ) : (
-                <p style={{ ...styles.genreResultLine, color: bonusStatus === "correct" ? "#1e7d32" : "#666" }}>
+                <p style={{ ...styles.genreResultLine, color: bonusStatus === "correct" ? PALETTE.success : PALETTE.mutedLight }}>
                   {bonusStatus === "correct" ? "✓ Style guessed right!" : `Style: ${actualStyles.join(", ")}`}
                 </p>
               )}
@@ -1020,17 +1277,17 @@ function GuessGenreGame() {
 const styles = {
   page: {
     minHeight: "100vh",
-    background: "#fafafa",
+    background: PALETTE.bg,
     fontFamily: "system-ui, -apple-system, 'Segoe UI', sans-serif",
-    color: "#1a1a1a",
+    color: PALETTE.primary,
     padding: "32px 16px",
   },
   container: { maxWidth: 560, margin: "0 auto" },
   header: { marginBottom: 20 },
   title: { fontSize: 28, fontWeight: 700, margin: 0 },
-  subtitle: { fontSize: 14, color: "#666", marginTop: 6 },
+  subtitle: { fontSize: 14, color: PALETTE.muted, marginTop: 6 },
 
-  tabRow: { display: "flex", gap: 8, marginBottom: 20, borderBottom: "1px solid #e5e5e5" },
+  tabRow: { display: "flex", gap: 8, marginBottom: 20, borderBottom: `1px solid ${PALETTE.border}` },
   tabButton: {
     padding: "10px 4px",
     marginRight: 16,
@@ -1039,158 +1296,208 @@ const styles = {
     background: "none",
     fontSize: 15,
     fontWeight: 600,
-    color: "#888",
+    color: PALETTE.mutedLight,
     cursor: "pointer",
   },
-  tabButtonActive: { color: "#1a1a1a", borderBottomColor: "#1a1a1a" },
+  tabButtonActive: { color: PALETTE.primary, borderBottomColor: PALETTE.accent },
 
   gameTabRow: { display: "flex", gap: 8, marginBottom: 18 },
   gameTabButton: {
     flex: 1,
     padding: "8px 10px",
     borderRadius: 999,
-    border: "1px solid #d4d4d4",
-    background: "#fff",
+    border: `1px solid ${PALETTE.border}`,
+    background: PALETTE.card,
     fontSize: 13,
     fontWeight: 600,
-    color: "#555",
+    color: PALETTE.muted,
     cursor: "pointer",
   },
-  gameTabButtonActive: { background: "#1a1a1a", color: "#fff", borderColor: "#1a1a1a" },
+  gameTabButtonActive: { background: PALETTE.accent, color: "#fff", borderColor: PALETTE.accent },
 
   comingSoon: {
-    background: "#fff",
-    border: "1px dashed #d4d4d4",
+    background: PALETTE.card,
+    border: `1px dashed ${PALETTE.border}`,
     borderRadius: 10,
     padding: 18,
   },
 
   form: {
-    background: "#fff",
-    border: "1px solid #e5e5e5",
-    borderRadius: 10,
-    padding: 20,
+    background: PALETTE.card,
+    border: `1px solid ${PALETTE.border}`,
+    borderRadius: 12,
+    padding: "24px 22px",
     display: "flex",
     flexDirection: "column",
-    gap: 12,
+    gap: 18,
   },
-  fieldRow: { display: "flex", flexDirection: "column", gap: 4 },
-  label: { fontSize: 12, fontWeight: 600, color: "#555", textTransform: "uppercase", letterSpacing: 0.4 },
+  formHeading: {
+    fontSize: 20,
+    fontWeight: 700,
+    margin: "0 0 4px",
+    color: PALETTE.primary,
+  },
+  fieldRow: { display: "flex", flexDirection: "column", gap: 6 },
+  label: { fontSize: 12, fontWeight: 600, color: PALETTE.muted, textTransform: "uppercase", letterSpacing: 0.5 },
   select: {
-    padding: "10px 12px",
-    borderRadius: 6,
-    border: "1px solid #d4d4d4",
+    padding: "11px 12px",
+    borderRadius: 7,
+    border: `1px solid ${PALETTE.border}`,
     fontSize: 14,
     background: "#fff",
+    color: PALETTE.primary,
   },
-  checkboxRow: { display: "flex", alignItems: "center", gap: 8, fontSize: 14, marginTop: 4 },
+  checkboxRow: { display: "flex", alignItems: "center", gap: 8, fontSize: 14, marginTop: 4, color: PALETTE.primary },
   chipRow: { display: "flex", flexWrap: "wrap", gap: 6 },
   chip: {
     padding: "6px 12px",
     borderRadius: 999,
-    border: "1px solid #d4d4d4",
+    border: `1px solid ${PALETTE.border}`,
     background: "#fff",
     fontSize: 12,
     fontWeight: 600,
-    color: "#555",
+    color: PALETTE.muted,
     cursor: "pointer",
   },
-  chipActive: { background: "#1a1a1a", color: "#fff", borderColor: "#1a1a1a" },
-  slider: { width: "100%", marginTop: 4 },
-  hintText: { fontSize: 12, color: "#888", marginTop: 4, lineHeight: 1.4 },
+  chipActive: { background: PALETTE.accent, color: "#fff", borderColor: PALETTE.accent },
+  slider: { width: "100%", marginTop: 4, accentColor: PALETTE.accent },
+  hintText: { fontSize: 12, color: PALETTE.mutedLight, marginTop: 4, lineHeight: 1.4 },
   button: {
     marginTop: 8,
-    padding: "12px 16px",
-    borderRadius: 6,
+    padding: "13px 16px",
+    borderRadius: 8,
     border: "none",
-    background: "#1a1a1a",
+    background: PALETTE.accent,
     color: "#fff",
     fontSize: 15,
-    fontWeight: 600,
+    fontWeight: 700,
     cursor: "pointer",
   },
   errorBox: {
     marginTop: 16,
     padding: 12,
-    borderRadius: 6,
-    background: "#fdecea",
-    color: "#8a1f11",
+    borderRadius: 8,
+    background: "#F7E6E1",
+    color: PALETTE.danger,
     fontSize: 14,
   },
   emptyBox: {
     marginTop: 16,
     padding: 12,
-    borderRadius: 6,
-    background: "#fff8e1",
-    color: "#7a5c00",
+    borderRadius: 8,
+    background: "#F3E9D2",
+    color: PALETTE.warn,
     fontSize: 14,
+  },
+  modeNotice: {
+    fontSize: 12.5,
+    color: PALETTE.accentDark,
+    fontStyle: "italic",
+    margin: "10px 2px 0",
   },
   card: {
     marginTop: 20,
-    background: "#fff",
-    border: "1px solid #e5e5e5",
-    borderRadius: 10,
+    background: PALETTE.card,
+    border: `1px solid ${PALETTE.border}`,
+    borderRadius: 12,
     overflow: "hidden",
     display: "flex",
     flexDirection: "column",
+    animation: "discoveryFadeIn 0.35s ease",
   },
-  cover: { width: "100%", aspectRatio: "1 / 1", objectFit: "cover", background: "#f0f0f0" },
-  coverPlaceholder: { display: "flex", alignItems: "center", justifyContent: "center", color: "#999", fontSize: 13 },
-  cardBody: { padding: 18 },
-  cardTitle: { fontSize: 19, fontWeight: 700, margin: "0 0 10px" },
+  cover: { width: "100%", aspectRatio: "1 / 1", objectFit: "cover", background: PALETTE.border, display: "block" },
+  coverPlaceholder: { display: "flex", alignItems: "center", justifyContent: "center", color: PALETTE.mutedLight, fontSize: 13 },
+  cardBody: { padding: "20px 20px 18px" },
+  cardTitle: { fontSize: 21, fontWeight: 800, margin: "0 0 2px", letterSpacing: -0.2 },
+  cardArtist: { fontSize: 15, fontWeight: 600, color: PALETTE.accentDark, margin: "0 0 6px" },
+  cardSubline: { fontSize: 13, color: PALETTE.muted, margin: "0 0 12px" },
   metaRow: { display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 10 },
+  genreTag: {
+    fontSize: 12,
+    fontWeight: 700,
+    background: PALETTE.accent,
+    padding: "4px 10px",
+    borderRadius: 999,
+    color: "#fff",
+  },
   tag: {
     fontSize: 12,
-    background: "#f0f0f0",
+    background: PALETTE.bg,
+    border: `1px solid ${PALETTE.border}`,
     padding: "4px 8px",
     borderRadius: 999,
-    color: "#444",
+    color: PALETTE.muted,
   },
-  metaLine: { fontSize: 13, color: "#444", margin: "4px 0" },
-  link: { display: "inline-block", marginTop: 10, fontSize: 14, color: "#1a1a1a", fontWeight: 600, textDecoration: "underline" },
+  styleChipRow: { display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 10 },
+  styleChip: {
+    fontSize: 12,
+    fontWeight: 600,
+    background: "#fff",
+    border: `1px solid ${PALETTE.border}`,
+    padding: "5px 10px",
+    borderRadius: 999,
+    color: PALETTE.primary,
+    cursor: "pointer",
+  },
+  stars: { color: PALETTE.accent, fontSize: 14, letterSpacing: 1 },
+  metaLine: { fontSize: 13, color: PALETTE.primary, margin: "6px 0" },
+  link: { display: "inline-block", marginTop: 10, fontSize: 14, color: PALETTE.accentDark, fontWeight: 700, textDecoration: "underline" },
   historySection: { marginTop: 24 },
+  discoveryModeRow: { display: "flex", gap: 8, marginTop: 16, flexWrap: "wrap" },
+  modeButton: {
+    flex: 1,
+    minWidth: 110,
+    padding: "10px 10px",
+    borderRadius: 8,
+    border: `1px solid ${PALETTE.border}`,
+    background: "#fff",
+    color: PALETTE.primary,
+    fontSize: 12.5,
+    fontWeight: 700,
+    cursor: "pointer",
+  },
   backToFiltersButton: {
     display: "block",
     width: "100%",
     marginTop: 12,
     padding: "10px 14px",
-    borderRadius: 6,
-    border: "1px solid #d4d4d4",
+    borderRadius: 8,
+    border: `1px solid ${PALETTE.border}`,
     background: "#fff",
-    color: "#555",
+    color: PALETTE.muted,
     fontSize: 13,
     fontWeight: 600,
     cursor: "pointer",
   },
-  historyTitle: { fontSize: 13, fontWeight: 600, color: "#666", marginBottom: 8 },
+  historyTitle: { fontSize: 13, fontWeight: 700, color: PALETTE.muted, marginBottom: 8 },
   historyRow: { display: "flex", gap: 10, overflowX: "auto" },
   historyItem: { display: "flex", flexDirection: "column", alignItems: "center", width: 64 },
-  historyThumb: { width: 56, height: 56, objectFit: "cover", borderRadius: 6 },
-  historyLabel: { fontSize: 10, color: "#777", marginTop: 4, textAlign: "center", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", width: "100%" },
+  historyThumb: { width: 56, height: 56, objectFit: "cover", borderRadius: 8 },
+  historyLabel: { fontSize: 10, color: PALETTE.mutedLight, marginTop: 4, textAlign: "center", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", width: "100%" },
 
   statToggleRow: { display: "flex", gap: 6, marginBottom: 14, flexWrap: "wrap" },
   statToggleButton: {
     padding: "6px 12px",
     borderRadius: 999,
-    border: "1px solid #d4d4d4",
+    border: `1px solid ${PALETTE.border}`,
     background: "#fff",
     fontSize: 12,
     fontWeight: 600,
-    color: "#555",
+    color: PALETTE.muted,
     cursor: "pointer",
   },
-  statToggleButtonActive: { background: "#1a1a1a", color: "#fff", borderColor: "#1a1a1a" },
+  statToggleButtonActive: { background: PALETTE.accent, color: "#fff", borderColor: PALETTE.accent },
 
-  scoreRow: { display: "flex", gap: 16, fontSize: 13, color: "#555", marginBottom: 14 },
+  scoreRow: { display: "flex", gap: 16, fontSize: 13, color: PALETTE.muted, marginBottom: 14 },
 
   duelRow: { display: "flex", alignItems: "stretch", gap: 8 },
   vsCol: { display: "flex", alignItems: "center", justifyContent: "center", width: 28 },
-  vsText: { fontSize: 12, fontWeight: 700, color: "#999" },
+  vsText: { fontSize: 12, fontWeight: 700, color: PALETTE.mutedLight },
 
   gameCard: {
     flex: 1,
-    background: "#fff",
-    border: "1px solid #e5e5e5",
+    background: PALETTE.card,
+    border: `1px solid ${PALETTE.border}`,
     borderRadius: 10,
     overflow: "hidden",
     display: "flex",
@@ -1204,35 +1511,35 @@ const styles = {
     fontWeight: 700,
     letterSpacing: 0.5,
     textTransform: "uppercase",
-    color: "#666",
-    background: "#f0f0f0",
+    color: PALETTE.muted,
+    background: PALETTE.bg,
   },
-  gameCover: { width: "100%", height: 180, objectFit: "cover", background: "#f0f0f0" },
+  gameCover: { width: "100%", height: 180, objectFit: "cover", background: PALETTE.border },
   gameCardBody: { padding: 12 },
   gameCardTitle: { fontSize: 13, fontWeight: 700, margin: "0 0 6px", minHeight: 34, overflow: "hidden" },
-  gameCardStat: { fontSize: 14, fontWeight: 700, margin: 0, color: "#1a1a1a" },
+  gameCardStat: { fontSize: 14, fontWeight: 700, margin: 0, color: PALETTE.primary },
   resultBanner: { fontSize: 12, fontWeight: 700, margin: "8px 0 0" },
 
   guessRow: { display: "flex", gap: 10, marginTop: 14 },
   guessButton: {
     flex: 1,
     padding: "12px 10px",
-    borderRadius: 6,
+    borderRadius: 8,
     border: "none",
-    background: "#1a1a1a",
+    background: PALETTE.accent,
     color: "#fff",
     fontSize: 13,
-    fontWeight: 600,
+    fontWeight: 700,
     cursor: "pointer",
   },
 
   genreCard: {
-    background: "#fff",
-    border: "1px solid #e5e5e5",
-    borderRadius: 10,
+    background: PALETTE.card,
+    border: `1px solid ${PALETTE.border}`,
+    borderRadius: 12,
     overflow: "hidden",
   },
-  genreCover: { width: "100%", aspectRatio: "1 / 1", objectFit: "cover", background: "#f0f0f0", display: "block" },
+  genreCover: { width: "100%", aspectRatio: "1 / 1", objectFit: "cover", background: PALETTE.border, display: "block" },
   coverWrap: { position: "relative" },
   imageArrow: {
     position: "absolute",
@@ -1269,12 +1576,12 @@ const styles = {
   },
   genreButton: {
     padding: "12px 6px",
-    borderRadius: 6,
-    border: "1px solid #d4d4d4",
-    background: "#fafafa",
+    borderRadius: 8,
+    border: `1px solid ${PALETTE.border}`,
+    background: PALETTE.bg,
     fontSize: 12.5,
     fontWeight: 600,
-    color: "#333",
+    color: PALETTE.primary,
     cursor: "pointer",
     lineHeight: 1.3,
   },
@@ -1286,27 +1593,27 @@ const styles = {
     flex: 1,
     minWidth: 140,
     padding: "10px 12px",
-    borderRadius: 6,
-    border: "1px solid #d4d4d4",
+    borderRadius: 7,
+    border: `1px solid ${PALETTE.border}`,
     fontSize: 14,
     background: "#fff",
   },
   bonusButton: {
     padding: "10px 14px",
-    borderRadius: 6,
+    borderRadius: 7,
     border: "none",
-    background: "#1a1a1a",
+    background: PALETTE.accent,
     color: "#fff",
     fontSize: 13,
-    fontWeight: 600,
+    fontWeight: 700,
     cursor: "pointer",
   },
   bonusSkip: {
     padding: "10px 14px",
-    borderRadius: 6,
-    border: "1px solid #d4d4d4",
+    borderRadius: 7,
+    border: `1px solid ${PALETTE.border}`,
     background: "#fff",
-    color: "#666",
+    color: PALETTE.muted,
     fontSize: 13,
     fontWeight: 600,
     cursor: "pointer",
