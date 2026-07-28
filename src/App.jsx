@@ -623,6 +623,7 @@ function DiscoverTab() {
   const { artist, title } = splitArtistTitle(result, detail);
   const ratingInfo = detail?.community?.rating;
   const hasResultContext = !!result;
+  const releaseUrl = result ? "https://www.discogs.com" + (result.uri || "") : "";
 
   return (
     <>
@@ -747,12 +748,14 @@ function DiscoverTab() {
       {result && (
         <div style={{ ...styles.card, ...(loading ? styles.cardDimmed : {}) }} ref={resultRef}>
           <div style={styles.coverWrap}>
-            <SmartImage
-              src={coverSrc}
-              alt={title}
-              style={styles.cover}
-              placeholderStyle={styles.coverPlaceholder}
-            />
+            <a href={releaseUrl} target="_blank" rel="noreferrer" style={styles.coverLink} aria-label={`View ${title} on Discogs`}>
+              <SmartImage
+                src={coverSrc}
+                alt={title}
+                style={styles.cover}
+                placeholderStyle={styles.coverPlaceholder}
+              />
+            </a>
             {images.length > 1 && (
               <>
                 <button
@@ -776,8 +779,34 @@ function DiscoverTab() {
             )}
           </div>
           <div style={styles.cardBody}>
-            <h2 style={styles.cardTitle}>{title}</h2>
-            {artist && <p style={styles.cardArtist}>{artist}</p>}
+            <h2 style={styles.cardTitle}>
+              <a href={releaseUrl} target="_blank" rel="noreferrer" style={styles.titleLink}>{title}</a>
+            </h2>
+            {artist && (
+              <p style={styles.cardArtist}>
+                {detail?.artists?.length ? (
+                  detail.artists.map((a, i) => (
+                    <React.Fragment key={a.id ?? a.name}>
+                      {i > 0 && ", "}
+                      {a.id ? (
+                        <a
+                          href={`https://www.discogs.com/artist/${a.id}`}
+                          target="_blank"
+                          rel="noreferrer"
+                          style={styles.artistLink}
+                        >
+                          {a.name}
+                        </a>
+                      ) : (
+                        a.name
+                      )}
+                    </React.Fragment>
+                  ))
+                ) : (
+                  artist
+                )}
+              </p>
+            )}
 
             <p style={styles.cardSubline}>
               {[result.year, result.country].filter(Boolean).join(" • ")}
@@ -881,10 +910,17 @@ function DiscoverTab() {
           <h3 style={styles.historyTitle}>Recently surfaced</h3>
           <div style={styles.historyRow}>
             {history.slice(1).map((h) => (
-              <div key={h.id} style={styles.historyItem} title={h.title}>
+              <a
+                key={h.id}
+                href={"https://www.discogs.com" + (h.uri || "")}
+                target="_blank"
+                rel="noreferrer"
+                style={styles.historyItem}
+                title={h.title}
+              >
                 {h.thumb ? <img src={h.thumb} alt={h.title} style={styles.historyThumb} /> : <div style={{ ...styles.historyThumb, background: PALETTE.border }} />}
                 <span style={styles.historyLabel}>{h.title}</span>
-              </div>
+              </a>
             ))}
           </div>
         </div>
@@ -1565,9 +1601,12 @@ const styles = {
   },
   cover: { width: "100%", aspectRatio: "1 / 1", objectFit: "cover", background: PALETTE.border, display: "block" },
   coverPlaceholder: { display: "flex", alignItems: "center", justifyContent: "center", color: PALETTE.mutedLight, fontSize: 13 },
+  coverLink: { display: "block", cursor: "pointer" },
   cardBody: { padding: "20px 20px 18px" },
   cardTitle: { fontSize: 21, fontWeight: 800, margin: "0 0 2px", letterSpacing: -0.2 },
+  titleLink: { color: "inherit", textDecoration: "none" },
   cardArtist: { fontSize: 15, fontWeight: 600, color: PALETTE.accentDark, margin: "0 0 6px" },
+  artistLink: { color: "inherit", textDecoration: "none" },
   cardSubline: { fontSize: 13, color: PALETTE.muted, margin: "0 0 12px" },
   metaRow: { display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 10 },
   genreTag: {
@@ -1629,7 +1668,7 @@ const styles = {
   },
   historyTitle: { fontSize: 13, fontWeight: 700, color: PALETTE.muted, marginBottom: 8 },
   historyRow: { display: "flex", gap: 10, overflowX: "auto" },
-  historyItem: { display: "flex", flexDirection: "column", alignItems: "center", width: 64 },
+  historyItem: { display: "flex", flexDirection: "column", alignItems: "center", width: 64, textDecoration: "none", cursor: "pointer" },
   historyThumb: { width: 56, height: 56, objectFit: "cover", borderRadius: 8 },
   historyLabel: { fontSize: 10, color: PALETTE.mutedLight, marginTop: 4, textAlign: "center", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", width: "100%" },
 
