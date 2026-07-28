@@ -3,21 +3,106 @@ import React, { useState, useMemo, useEffect, useCallback, useRef } from "react"
 // ---- Controlled vocab (mirrors Discogs' own genre/style taxonomy, trimmed to common picks) ----
 const GENRE_STYLES = {
   "Any Genre": [],
-  "Jazz": ["Free Jazz", "Bop", "Fusion", "Modal", "Soul-Jazz", "Post Bop", "Big Band", "Avant-garde Jazz", "Latin Jazz"],
-  "Electronic": ["House", "Techno", "Ambient", "Disco", "Synth-pop", "Downtempo", "Acid", "IDM", "Electro"],
-  "Funk / Soul": ["Funk", "Soul", "Disco", "Rhythm & Blues", "Neo Soul", "P.Funk"],
-  "Hip Hop": ["Conscious", "Boom Bap", "G-Funk", "Trip Hop", "Instrumental", "Gangsta"],
-  "Rock": [
-    "Psychedelic Rock", "Prog Rock", "Krautrock", "Punk", "Post-Punk", "Shoegaze", "Garage Rock", "Folk Rock",
-    "Heavy Metal", "Thrash", "Death Metal", "Black Metal", "Doom Metal", "Speed Metal", "AOR", "Nu Metal", "Sludge Metal",
+"Blues": [
+    "Chicago Blues",
+    "Delta Blues",
+    "Electric Blues"
   ],
-  "Folk, World, & Country": ["Folk", "Country", "African", "Afrobeat", "Latin", "Flamenco"],
-  "Latin": ["Salsa", "Bossa Nova", "Cumbia", "Boogaloo", "MPB"],
-  "Reggae": ["Dub", "Roots Reggae", "Dancehall", "Ska"],
-  "Classical": ["Baroque", "Romantic", "Modern", "Contemporary"],
-  "Blues": ["Chicago Blues", "Delta Blues", "Electric Blues"],
-  "Pop": ["Synth-pop", "City Pop", "Europop", "Bubblegum", "Indie Pop", "Vocal", "Chanson", "Kayōkyoku", "Ballad"],
-};
+  "Classical": [
+    "Baroque",
+    "Contemporary",
+    "Modern",
+    "Romantic"
+  ],
+  "Electronic": [
+    "Acid",
+    "Ambient",
+    "Disco",
+    "Downtempo",
+    "Electro",
+    "House",
+    "IDM",
+    "Synth-pop",
+    "Techno"
+  ],
+  "Folk, World, & Country": [
+    "African",
+    "Afrobeat",
+    "Country",
+    "Flamenco",
+    "Folk",
+    "Latin"
+  ],
+  "Funk / Soul": [
+    "Disco",
+    "Funk",
+    "Neo Soul",
+    "P.Funk",
+    "Rhythm & Blues",
+    "Soul"
+  ],
+  "Hip Hop": [
+    "Boom Bap",
+    "Conscious",
+    "G-Funk",
+    "Gangsta",
+    "Instrumental",
+    "Trip Hop"
+  ],
+  "Jazz": [
+    "Avant-garde Jazz",
+    "Big Band",
+    "Bop",
+    "Free Jazz",
+    "Fusion",
+    "Latin Jazz",
+    "Modal",
+    "Post Bop",
+    "Soul-Jazz"
+  ],
+  "Latin": [
+    "Boogaloo",
+    "Bossa Nova",
+    "Cumbia",
+    "MPB",
+    "Salsa"
+  ],
+  "Pop": [
+    "Ballad",
+    "Bubblegum",
+    "Chanson",
+    "City Pop",
+    "Europop",
+    "Indie Pop",
+    "Kayōkyoku",
+    "Synth-pop",
+    "Vocal"
+  ],
+  "Reggae": [
+    "Dancehall",
+    "Dub",
+    "Roots Reggae",
+    "Ska"
+  ],
+  "Rock": [
+    "AOR",
+    "Black Metal",
+    "Death Metal",
+    "Doom Metal",
+    "Folk Rock",
+    "Garage Rock",
+    "Heavy Metal",
+    "Krautrock",
+    "Nu Metal",
+    "Post-Punk",
+    "Prog Rock",
+    "Psychedelic Rock",
+    "Punk",
+    "Shoegaze",
+    "Sludge Metal",
+    "Speed Metal",
+    "Thrash"
+  ]
 
 const DECADES = ["Any Decade", "1950s", "1960s", "1970s", "1980s", "1990s", "2000s", "2010s", "2020s"];
 
