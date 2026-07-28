@@ -1,4 +1,5 @@
 import React, { useState, useMemo, useEffect, useCallback } from "react";
+import { Analytics } from "@vercel/analytics/react";
 
 // ---- Controlled vocab (mirrors Discogs' own genre/style taxonomy, trimmed to common picks) ----
 const GENRE_STYLES = {
@@ -114,6 +115,7 @@ export default function App() {
 
         {tab === "discover" ? <DiscoverTab /> : <GamesTab />}
       </div>
+      <Analytics />
     </div>
   );
 }
