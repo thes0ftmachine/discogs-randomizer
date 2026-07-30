@@ -308,7 +308,7 @@ async function randomReleaseSearch(baseParams, excluded, signal) {
 }
 
 export default function App() {
-  const [tab, setTab] = useState("discover"); // 'discover' | 'games'
+  const [tab, setTab] = useState("discover"); // 'discover' | 'artists' | 'games'
 
   return (
     <div style={styles.page}>
@@ -345,6 +345,12 @@ export default function App() {
             Discover
           </button>
           <button
+            style={{ ...styles.tabButton, ...(tab === "artists" ? styles.tabButtonActive : {}) }}
+            onClick={() => setTab("artists")}
+          >
+            Artists
+          </button>
+          <button
             style={{ ...styles.tabButton, ...(tab === "games" ? styles.tabButtonActive : {}) }}
             onClick={() => setTab("games")}
           >
@@ -352,7 +358,7 @@ export default function App() {
           </button>
         </div>
 
-        {tab === "discover" ? <DiscoverTab /> : <GamesTab />}
+        {tab === "discover" ? <DiscoverTab /> : tab === "artists" ? <ArtistExplorerTab /> : <GamesTab />}
       </div>
     </div>
   );
@@ -929,6 +935,369 @@ function DiscoverTab() {
   );
 }
 
+
+// ============================== ARTIST EXPLORER TAB ==============================
+
+// Discogs has no artist-similarity endpoint. This approximates one: build a genre/style
+// profile from a sample of the artist's own discography, then see which other artists
+// turn up most often in searches against that same genre/style combination. It's a
+// "shares a bin" proxy, not taste-based similarity — but for crate-digging that's usually
+// the more useful signal anyway.
+
+const ARTIST_RELEASE_SAMPLE_SIZE = 18; // how many of the artist's own releases get detail-fetched to build the profile
+const ARTIST_RELEASE_PAGE_CAP = 3; // discography pages considered before sampling (300 releases is plenty even for prolific artists)
+const SIMILAR_SEARCH_PAGES = 2; // pages pulled per genre/style combo when hunting for neighbors
+
+// Discogs disambiguates same-named artists right in the title itself — "Weed (2)" — so
+// there's no fragile parsing needed to detect it, just a display-friendly strip of the suffix.
+function cleanArtistName(name) {
+  return String(name || "").replace(/\s\(\d+\)$/, "").trim();
+}
+
+async function fetchArtistReleases(id, page, signal) {
+  return apiFetch({ kind: "artistReleases", id: String(id), page: String(page), per_page: "100", sort: "year", sort_order: "asc" }, signal);
+}
+
+function ArtistExplorerTab() {
+  const [query, setQuery] = useState("");
+  const [searching, setSearching] = useState(false);
+  const [searchError, setSearchError] = useState("");
+  const [candidates, setCandidates] = useState(null); // null = no search yet, [] = searched with no results
+  const [selected, setSelected] = useState(null);
+
+  const [profileLoading, setProfileLoading] = useState(false);
+  const [profileLabel, setProfileLabel] = useState("");
+  const [profileError, setProfileError] = useState("");
+  const [genreProfile, setGenreProfile] = useState([]);
+  const [styleProfile, setStyleProfile] = useState([]);
+  const [sampleCount, setSampleCount] = useState(0);
+
+  const [similarLoading, setSimilarLoading] = useState(false);
+  const [similarError, setSimilarError] = useState("");
+  const [similarArtists, setSimilarArtists] = useState([]);
+
+  const requestRef = useRef(null);
+
+  async function selectArtist(artist, signal) {
+    setSelected(artist);
+    setCandidates(null);
+    setProfileError("");
+    setSimilarError("");
+    setSimilarArtists([]);
+    setGenreProfile([]);
+    setStyleProfile([]);
+    setProfileLoading(true);
+    setProfileLabel("Pulling their discography…");
+
+    try {
+      const first = await fetchArtistReleases(artist.id, 1, signal);
+      const pages = Math.min(first.pagination?.pages || 1, ARTIST_RELEASE_PAGE_CAP);
+      let items = (first.results || []).filter((r) => r.type === "release");
+
+      for (let p = 2; p <= pages; p++) {
+        const more = await fetchArtistReleases(artist.id, p, signal);
+        items = items.concat((more.results || []).filter((r) => r.type === "release"));
+      }
+
+      if (items.length === 0) {
+        setProfileError(
+          "Discogs doesn't have individually-tagged releases for this artist (common for artists only credited on compilations, or via a group). Try a different disambiguation entry if one was offered, or search a related act."
+        );
+        setProfileLoading(false);
+        return;
+      }
+
+      const sample = shuffle(items).slice(0, ARTIST_RELEASE_SAMPLE_SIZE);
+      setProfileLabel(`Checking ${sample.length} releases for genre/style…`);
+
+      const genreCounts = new Map();
+      const styleCounts = new Map();
+      let checked = 0;
+
+      for (const item of sample) {
+        if (signal?.aborted) return;
+        try {
+          const detail = await discogsFetchDetail(item.resource_url, signal);
+          (detail.genres || []).forEach((g) => genreCounts.set(g, (genreCounts.get(g) || 0) + 1));
+          (detail.styles || []).forEach((s) => styleCounts.set(s, (styleCounts.get(s) || 0) + 1));
+          checked++;
+        } catch (e) {
+          if (e.name === "AbortError") return;
+          // one bad release shouldn't sink the whole profile — just skip it
+        }
+        await sleep(120);
+      }
+
+      if (signal?.aborted) return;
+
+      const sortedGenres = [...genreCounts.entries()].sort((a, b) => b[1] - a[1]).map(([name, count]) => ({ name, count }));
+      const sortedStyles = [...styleCounts.entries()].sort((a, b) => b[1] - a[1]).map(([name, count]) => ({ name, count }));
+
+      setGenreProfile(sortedGenres);
+      setStyleProfile(sortedStyles);
+      setSampleCount(checked);
+      setProfileLoading(false);
+
+      if (sortedGenres.length > 0) {
+        findSimilarArtists(artist, sortedGenres, sortedStyles, signal);
+      }
+    } catch (e) {
+      if (e.name === "AbortError") return;
+      setProfileError(e.message || "Couldn't pull that artist's discography from Discogs. Try again in a second.");
+      setProfileLoading(false);
+    }
+  }
+
+  async function findSimilarArtists(artist, genres, stylesList, signal) {
+    setSimilarLoading(true);
+    setSimilarError("");
+    const excludeName = cleanArtistName(artist.title).toLowerCase();
+    const topGenre = genres[0].name;
+    // Style-level combos are narrower and more musically specific — fall back to genre
+    // alone only if the sample turned up no styles at all.
+    const combos = stylesList.length > 0
+      ? stylesList.slice(0, 2).map((s) => ({ genre: topGenre, style: s.name }))
+      : [{ genre: topGenre, style: undefined }];
+
+    try {
+      const tally = new Map();
+      for (const combo of combos) {
+        for (let page = 1; page <= SIMILAR_SEARCH_PAGES; page++) {
+          if (signal?.aborted) return;
+          const params = { type: "release", genre: combo.genre };
+          if (combo.style) params.style = combo.style;
+          let data;
+          try {
+            data = await discogsFetch({ ...params, page: String(page), per_page: "100" }, signal);
+          } catch (e) {
+            if (e.name === "AbortError") return;
+            await sleep(600);
+            continue;
+          }
+          // Search results only expose a combined "Artist - Title" string, same as the
+          // Discover tab works around — split on the first " - " to recover the artist.
+          for (const r of data.results || []) {
+            const raw = String(r.title || "");
+            const idx = raw.indexOf(" - ");
+            if (idx === -1) continue;
+            const cleaned = cleanArtistName(raw.slice(0, idx));
+            if (!cleaned || cleaned.toLowerCase() === excludeName) continue;
+            tally.set(cleaned, (tally.get(cleaned) || 0) + 1);
+          }
+          await sleep(150);
+        }
+      }
+
+      const ranked = [...tally.entries()]
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, 12)
+        .map(([name, count]) => ({ name, count }));
+
+      setSimilarArtists(ranked);
+    } catch (e) {
+      if (e.name === "AbortError") return;
+      setSimilarError("Couldn't pull similar artists from Discogs. Try again in a second.");
+    } finally {
+      setSimilarLoading(false);
+    }
+  }
+
+  async function handleSearch(e) {
+    e?.preventDefault?.();
+    const name = query.trim();
+    if (!name) return;
+    requestRef.current?.abort();
+    const controller = new AbortController();
+    requestRef.current = controller;
+
+    setSearching(true);
+    setSearchError("");
+    setCandidates(null);
+    setSelected(null);
+    setGenreProfile([]);
+    setStyleProfile([]);
+    setSimilarArtists([]);
+
+    try {
+      const data = await discogsFetch({ type: "artist", q: name, per_page: "10" }, controller.signal);
+      const results = (data.results || []).filter((r) => r.type === "artist");
+      setSearching(false);
+      if (results.length === 1) {
+        selectArtist(results[0], controller.signal);
+      } else {
+        setCandidates(results);
+      }
+    } catch (e2) {
+      if (e2.name === "AbortError") return;
+      setSearching(false);
+      setSearchError(e2.message || "Couldn't search Discogs artists. Try again in a second.");
+    }
+  }
+
+  function handlePickCandidate(artist) {
+    requestRef.current?.abort();
+    const controller = new AbortController();
+    requestRef.current = controller;
+    selectArtist(artist, controller.signal);
+  }
+
+  // A tap on a similar-artist chip re-runs the same search flow with that name — still
+  // routes through the disambiguation picker if that name happens to collide too.
+  function handleExploreSimilar(name) {
+    setQuery(name);
+    requestRef.current?.abort();
+    const controller = new AbortController();
+    requestRef.current = controller;
+    setSearching(true);
+    setSearchError("");
+    setCandidates(null);
+    setSelected(null);
+    setGenreProfile([]);
+    setStyleProfile([]);
+    setSimilarArtists([]);
+    discogsFetch({ type: "artist", q: name, per_page: "10" }, controller.signal)
+      .then((data) => {
+        const results = (data.results || []).filter((r) => r.type === "artist");
+        setSearching(false);
+        if (results.length === 1) selectArtist(results[0], controller.signal);
+        else setCandidates(results);
+      })
+      .catch((e) => {
+        if (e.name === "AbortError") return;
+        setSearching(false);
+        setSearchError(e.message || "Couldn't search Discogs artists. Try again in a second.");
+      });
+  }
+
+  return (
+    <>
+      <form style={styles.form} onSubmit={handleSearch}>
+        <p style={styles.formHeading}>Find an artist</p>
+        <div style={styles.fieldRow}>
+          <label style={styles.label}>Artist name</label>
+          <input
+            type="text"
+            style={styles.textInput}
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="e.g. Ween"
+          />
+          <p style={styles.hintText}>
+            If more than one Discogs artist shares that name, you'll get a pick list — no need to know the exact catalog entry or its disambiguation number.
+          </p>
+        </div>
+        <button type="submit" style={styles.button} disabled={searching || !query.trim()}>
+          {searching ? "Searching…" : "Search"}
+        </button>
+      </form>
+
+      {searching && (
+        <div style={styles.digBox}>
+          <span style={styles.digSpinner} aria-hidden="true" />
+          <span>Searching Discogs artists…</span>
+        </div>
+      )}
+      {!searching && searchError && <div style={styles.errorBox}>{searchError}</div>}
+      {!searching && candidates && candidates.length === 0 && (
+        <div style={styles.emptyBox}>No Discogs artists matched that name.</div>
+      )}
+
+      {!searching && candidates && candidates.length > 1 && (
+        <div style={styles.artistPickList}>
+          <p style={styles.historyTitle}>Which one?</p>
+          {candidates.map((c) => (
+            <button key={c.id} type="button" style={styles.artistPickRow} onClick={() => handlePickCandidate(c)}>
+              {c.thumb ? (
+                <img src={c.thumb} alt={c.title} style={styles.artistPickThumb} />
+              ) : (
+                <div style={{ ...styles.artistPickThumb, background: PALETTE.border }} />
+              )}
+              <span>{c.title}</span>
+            </button>
+          ))}
+        </div>
+      )}
+
+      {selected && (
+        <div style={styles.card}>
+          <div style={styles.cardBody}>
+            <h2 style={styles.cardTitle}>{cleanArtistName(selected.title)}</h2>
+            <a
+              href={"https://www.discogs.com" + (selected.uri || `/artist/${selected.id}`)}
+              target="_blank"
+              rel="noreferrer"
+              style={styles.link}
+            >
+              View on Discogs →
+            </a>
+
+            {profileLoading && (
+              <div style={{ ...styles.digBox, marginTop: 16 }}>
+                <span style={styles.digSpinner} aria-hidden="true" />
+                <span>{profileLabel}</span>
+              </div>
+            )}
+            {!profileLoading && profileError && <div style={{ ...styles.errorBox, marginTop: 16 }}>{profileError}</div>}
+
+            {!profileLoading && genreProfile.length > 0 && (
+              <>
+                <p style={{ ...styles.historyTitle, marginTop: 20 }}>
+                  Genre/style profile (from {sampleCount} sampled releases)
+                </p>
+                <div style={styles.metaRow}>
+                  {genreProfile.slice(0, 4).map((g) => (
+                    <span key={g.name} style={styles.genreTag}>{g.name}</span>
+                  ))}
+                </div>
+                {styleProfile.length > 0 && (
+                  <div style={styles.styleChipRow}>
+                    {styleProfile.slice(0, 8).map((s) => (
+                      <span key={s.name} style={styles.tag}>{s.name} · {s.count}</span>
+                    ))}
+                  </div>
+                )}
+              </>
+            )}
+
+            {similarLoading && (
+              <div style={{ ...styles.digBox, marginTop: 16 }}>
+                <span style={styles.digSpinner} aria-hidden="true" />
+                <span>Scanning for artists who share that genre/style…</span>
+              </div>
+            )}
+            {!similarLoading && similarError && <div style={{ ...styles.errorBox, marginTop: 16 }}>{similarError}</div>}
+
+            {!similarLoading && similarArtists.length > 0 && (
+              <>
+                <p style={{ ...styles.historyTitle, marginTop: 20 }}>Artists who share that bin</p>
+                <div style={styles.similarGrid}>
+                  {similarArtists.map((a) => (
+                    <button
+                      key={a.name}
+                      type="button"
+                      style={styles.similarChip}
+                      onClick={() => handleExploreSimilar(a.name)}
+                      title={`Search for ${a.name}`}
+                    >
+                      {a.name} <span style={styles.similarCount}>{a.count}</span>
+                    </button>
+                  ))}
+                </div>
+                <p style={styles.hintText}>
+                  This is a genre/style overlap, not a true similarity score — Discogs doesn't expose one. Tap a name to explore it the same way.
+                </p>
+              </>
+            )}
+
+            {!similarLoading && !profileLoading && genreProfile.length === 0 && !profileError && (
+              <p style={{ ...styles.hintText, marginTop: 16 }}>No genre data turned up in the sampled releases.</p>
+            )}
+          </div>
+        </div>
+      )}
+    </>
+  );
+}
 
 // ============================== GAMES TAB ==============================
 
@@ -1515,6 +1884,57 @@ const styles = {
     fontSize: 14,
     background: "#fff",
     color: PALETTE.primary,
+  },
+  textInput: {
+    padding: "11px 12px",
+    borderRadius: 7,
+    border: `1px solid ${PALETTE.border}`,
+    fontSize: 14,
+    background: "#fff",
+    color: PALETTE.primary,
+  },
+  artistPickList: {
+    marginTop: 16,
+    display: "flex",
+    flexDirection: "column",
+    gap: 8,
+  },
+  artistPickRow: {
+    display: "flex",
+    alignItems: "center",
+    gap: 10,
+    padding: "8px 10px",
+    borderRadius: 8,
+    border: `1px solid ${PALETTE.border}`,
+    background: PALETTE.card,
+    fontSize: 14,
+    fontWeight: 600,
+    color: PALETTE.primary,
+    cursor: "pointer",
+    textAlign: "left",
+  },
+  artistPickThumb: { width: 40, height: 40, borderRadius: 6, objectFit: "cover", flexShrink: 0 },
+  similarGrid: { display: "flex", flexWrap: "wrap", gap: 8 },
+  similarChip: {
+    padding: "8px 12px",
+    borderRadius: 999,
+    border: `1px solid ${PALETTE.border}`,
+    background: "#fff",
+    fontSize: 13,
+    fontWeight: 600,
+    color: PALETTE.primary,
+    cursor: "pointer",
+    display: "flex",
+    alignItems: "center",
+    gap: 6,
+  },
+  similarCount: {
+    fontSize: 11,
+    fontWeight: 700,
+    color: "#fff",
+    background: PALETTE.accent,
+    borderRadius: 999,
+    padding: "1px 6px",
   },
   checkboxRow: { display: "flex", alignItems: "center", gap: 8, fontSize: 14, marginTop: 4, color: PALETTE.primary },
   chipRow: { display: "flex", flexWrap: "wrap", gap: 6 },
