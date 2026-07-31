@@ -154,9 +154,9 @@ const PALETTE = {
   primary: "#2E2A22",
   muted: "#7C7259",
   mutedLight: "#948B72",
-  accent: "#C1652F",
-  accentDark: "#8C4A20",
-  success: "#5B6B47",
+  accent: "#598396",
+  accentDark: "#2754a8",
+  success: "#4E8B5D",
   danger: "#B3402E",
   warn: "#8A6A1F",
 };
