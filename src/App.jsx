@@ -144,19 +144,19 @@ const COUNTRIES = [
 // more than one, we broaden the query and filter candidates client-side instead.
 const FORMAT_OPTIONS = ["Vinyl", "LP", "CD", "Cassette", "7\"", "10\"", "12\"", "Box Set"];
 
-// Warm-neutral palette — leans toward "flipping through record bins" rather than a
+// Warm-earthy palette — leans toward "flipping through record bins" rather than a
 // generic utilitarian gray/white/black app.
 const PALETTE = {
-  bg: "#F5F3EE",
+  bg: "#F4EDE1",
   card: "#FFFFFF",
-  border: "#DDD8CE",
-  borderStrong: "#C9C2B2",
-  primary: "#222222",
-  muted: "#75705F",
-  mutedLight: "#948E7C",
-  accent: "#598396",
-  accentDark: "#2754a8",
-  success: "#4E8B5D",
+  border: "#E3D9C6",
+  borderStrong: "#D0C2A8",
+  primary: "#2E2A22",
+  muted: "#7C7259",
+  mutedLight: "#948B72",
+  accent: "#C1652F",
+  accentDark: "#8C4A20",
+  success: "#5B6B47",
   danger: "#B3402E",
   warn: "#8A6A1F",
 };
