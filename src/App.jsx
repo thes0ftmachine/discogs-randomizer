@@ -1629,7 +1629,7 @@ const styles = {
   styleChip: {
     fontSize: 12,
     fontWeight: 600,
-    background: "#fff",
+    background: "#6FA987",
     border: `1px solid ${PALETTE.border}55`,
     padding: "5px 10px",
     borderRadius: 999,
