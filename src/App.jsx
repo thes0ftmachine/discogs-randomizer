@@ -1307,13 +1307,12 @@ function GameCard({ release, statMeta, role, statRevealed, value, resultBanner }
   const cover = detail?.images?.[0]?.uri || detail?.images?.[0]?.uri150 || pick?.cover_image || null;
 
   return (
-    <div className="discovery-card-reveal" style={styles.gameCard}>
-      <span style={styles.roleLabel}>{role}</span>
-      {cover ? (
-        <img key={cover} className="discovery-cover-reveal" src={cover} alt={pick.title} style={styles.gameCover} />
-      ) : (
-        <div style={{ ...styles.gameCover, ...styles.coverPlaceholder }}>No image</div>
-      )}
+<SmartImage
+  src={cover}
+  alt={pick.title}
+  style={styles.gameCover}
+  placeholderStyle={styles.coverPlaceholder}
+/>
       <div style={styles.gameCardBody}>
         <p style={styles.gameCardTitle}>{pick.title}</p>
         <p style={styles.gameCardStat}>
@@ -1498,11 +1497,12 @@ function GuessGenreGame() {
       {round && (
         <div className="discovery-card-reveal" key={round.pick.id} style={styles.genreCard}>
           <div style={styles.coverWrap}>
-            {cover ? (
-              <img key={cover} className="discovery-cover-reveal" src={cover} alt={phase === "revealed" ? round.pick.title : "Guess the genre"} style={styles.genreCover} />
-            ) : (
-              <div style={{ ...styles.genreCover, ...styles.coverPlaceholder }}>No image</div>
-            )}
+<SmartImage
+  src={cover}
+  alt={phase === "revealed" ? round.pick.title : "Guess the genre"}
+  style={styles.genreCover}
+  placeholderStyle={styles.coverPlaceholder}
+/>
             {images.length > 1 && (
               <>
                 <button
