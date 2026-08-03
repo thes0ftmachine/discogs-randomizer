@@ -574,13 +574,13 @@ function DiscoverTab() {
   // "Hidden Gem" — well-loved but rarely owned: rating > 4.2 with fewer than 100 haves.
   function handleHiddenGem() {
     weirderCeilingRef.current = null;
-    setModeNotice("Hunting for a hidden gem (rating > 4.2, under 100 haves)…");
+    setModeNotice("Hunting for a hidden gem (rating > 4.2, 10+ ratings, under 100 haves)…");
     findRelease({
       label: "Hunting for a hidden gem…",
       extraCheck: (full) => {
         const r = full.community?.rating;
         const have = full.community?.have;
-        return !!r && r.count > 0 && r.average > 4.2 && typeof have === "number" && have < 100;
+        return !!r && r.count >= 10 && r.average > 4.2 && typeof have === "number" && have < 200;
       },
     });
   }
