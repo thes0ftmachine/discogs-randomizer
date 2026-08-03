@@ -307,6 +307,37 @@ async function randomReleaseSearch(baseParams, excluded, signal) {
   return shuffle(items)[0];
 }
 
+function Turntable({ size = 64 }) {
+  return (
+    <div style={{ width: size, height: size, flexShrink: 0 }}>
+      <svg viewBox="0 0 100 100" width={size} height={size}>
+        {/* platter base */}
+        <circle cx="50" cy="50" r="48" fill={PALETTE.borderStrong} />
+        <circle cx="50" cy="50" r="44" fill={PALETTE.primary} />
+
+        {/* spinning record */}
+        <g className="discovery-record-spin" style={{ transformOrigin: "50px 50px" }}>
+          <circle cx="50" cy="50" r="40" fill="#1b1b1b" />
+          {/* grooves */}
+          <circle cx="50" cy="50" r="34" fill="none" stroke="#333" strokeWidth="0.6" />
+          <circle cx="50" cy="50" r="28" fill="none" stroke="#333" strokeWidth="0.6" />
+          <circle cx="50" cy="50" r="22" fill="none" stroke="#333" strokeWidth="0.6" />
+          {/* label */}
+          <circle cx="50" cy="50" r="14" fill={PALETTE.accent} />
+          <circle cx="50" cy="50" r="2.5" fill={PALETTE.bg} />
+        </g>
+
+        {/* tonearm */}
+        <g>
+          <circle cx="82" cy="22" r="5" fill={PALETTE.mutedLight} />
+          <line x1="82" y1="22" x2="58" y2="46" stroke={PALETTE.mutedLight} strokeWidth="3" strokeLinecap="round" />
+          <circle cx="58" cy="46" r="2.5" fill={PALETTE.accentDark} />
+        </g>
+      </svg>
+    </div>
+  );
+}
+
 export default function App() {
   const [tab, setTab] = useState("discover"); // 'discover' | 'games'
 
@@ -320,6 +351,18 @@ export default function App() {
           from { opacity: 0; transform: translateY(6px); }
           to { opacity: 1; transform: translateY(0); }
         }
+      
+      @keyframes discoveryRecordSpin {
+        to { transform: rotate(360deg); }
+        }
+      .discovery-record-spin {
+        animation: discoveryRecordSpin 3s linear infinite;
+        }
+        @media (prefers-reduced-motion: reduce) {
+        .discovery-record-spin { animation: none; }
+        }
+
+        
         @keyframes discoveryFadeIn {
           from { opacity: 0; transform: translateY(6px); }
           to { opacity: 1; transform: translateY(0); }
@@ -339,10 +382,13 @@ export default function App() {
         }
       `}</style>
       <div style={styles.container}>
-        <header style={styles.header}>
-          <h1 style={styles.title}>Random Discovery</h1>
-          <p style={styles.subtitle}>Explore the depths of Discogs releases at random (kind of) or play a few mini games.</p>
-        </header>
+<header style={{ ...styles.header, display: "flex", alignItems: "center", gap: 16 }}>
+  <Turntable size={64} />
+  <div>
+    <h1 style={styles.title}>Random Discovery</h1>
+    <p style={styles.subtitle}>Explore the depths of Discogs releases at random (kind of) or play a few mini games.</p>
+  </div>
+</header>
 
         <div style={styles.tabRow}>
           <button
