@@ -313,6 +313,13 @@ export default function App() {
   return (
     <div style={styles.page}>
       <style>{`
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+          html, body { background: ${PALETTE.bg}; }
+
+      @keyframes discoveryFadeIn {
+          from { opacity: 0; transform: translateY(6px); }
+          to { opacity: 1; transform: translateY(0); }
+        }
         @keyframes discoveryFadeIn {
           from { opacity: 0; transform: translateY(6px); }
           to { opacity: 1; transform: translateY(0); }
@@ -1629,8 +1636,8 @@ const styles = {
   styleChip: {
     fontSize: 12,
     fontWeight: 600,
-    background: "#6FA987",
-    border: `1px solid ${PALETTE.border}95`,
+    background: "#fff",
+    border: `1px solid ${PALETTE.border}`,
     padding: "5px 10px",
     borderRadius: 999,
     color: PALETTE.primary,
