@@ -85,19 +85,27 @@ const GENRE_STYLES = {
     "Space-Age"
   ],
   "Latin": [
+    "Afro-Cuban"
     "Boogaloo",
     "Bossa Nova",
+    "Cha-Cha",
     "Cumbia",
+    "Guaracha",
+    "Mambo",
     "MPB",
-    "Salsa"
+    "Salsa",
+    "Tango"
   ],
   "Pop": [
     "Ballad",
+    "Bollywood",
     "Bubblegum",
     "Chanson",
     "City Pop",
     "Europop",
     "Indie Pop",
+    "J-pop",
+    "K-pop",
     "Kayōkyoku",
     "Synth-pop",
     "Vocal"
@@ -110,6 +118,7 @@ const GENRE_STYLES = {
   ],
   "Rock": [
     "AOR",
+    "Alternative Rock",
     "Art Rock",
     "Black Metal",
     "Blues Rock",
@@ -121,6 +130,7 @@ const GENRE_STYLES = {
     "Garage Rock",
     "Glam",
     "Heavy Metal",
+    "Indie Rock",
     "Krautrock",
     "New Wave",
     "Nu Metal",
