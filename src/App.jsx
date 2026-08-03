@@ -85,7 +85,7 @@ const GENRE_STYLES = {
     "Space-Age"
   ],
   "Latin": [
-    "Afro-Cuban"
+    "Afro-Cuban",
     "Boogaloo",
     "Bossa Nova",
     "Cha-Cha",
