@@ -330,8 +330,8 @@ function Turntable({ size = 64 }) {
         {/* tonearm */}
         <g>
           <circle cx="82" cy="22" r="5" fill={PALETTE.mutedLight} />
-          <line x1="82" y1="22" x2="58" y2="46" stroke={PALETTE.mutedLight} strokeWidth="3" strokeLinecap="round" />
-          <circle cx="58" cy="46" r="2.5" fill={PALETTE.accentDark} />
+          <line x1="82" y1="22" x2="65" y2="39" stroke={PALETTE.mutedLight} strokeWidth="3" strokeLinecap="round" />
+          <circle cx="65" cy="39" r="2.5" fill={PALETTE.accentDark} />
         </g>
       </svg>
     </div>
