@@ -1306,9 +1306,6 @@ function GameCard({ release, statMeta, role, statRevealed, value, resultBanner }
   const pick = release.pick;
   const cover = detail?.images?.[0]?.uri || detail?.images?.[0]?.uri150 || pick?.cover_image || null;
 
-  return (
-    <div className="discovery-card-reveal" style={styles.gameCard}>
-      <span style={styles.roleLabel}>{role}</span>
 return (
     <div className="discovery-card-reveal" style={styles.gameCard}>
       <span style={styles.roleLabel}>{role}</span>
@@ -1318,7 +1315,6 @@ return (
         style={styles.gameCover}
         placeholderStyle={styles.coverPlaceholder}
       />
-      <div style={styles.gameCardBody}>
       <div style={styles.gameCardBody}>
         <p style={styles.gameCardTitle}>{pick.title}</p>
         <p style={styles.gameCardStat}>
