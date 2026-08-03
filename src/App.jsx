@@ -832,10 +832,10 @@ function DiscoverTab() {
                     style={styles.styleChip}
                     onClick={() => handleRabbitHole(s)}
                     disabled={loading}
-                    title="Rabbit hole: search this genre + style"
-                  >
-                    🐇 {s}
-                  </button>
+                    title="Dig into this genre + style"
+                      >
+                      <span style={{ color: PALETTE.accentDark, fontWeight: 700 }}>⟳</span> {s}
+                      </button>
                 ))}
               </div>
             )}
