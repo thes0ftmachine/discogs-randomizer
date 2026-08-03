@@ -1630,7 +1630,7 @@ const styles = {
     fontSize: 12,
     fontWeight: 600,
     background: "#6FA987",
-    border: `1px solid ${PALETTE.border}55`,
+    border: `1px solid ${PALETTE.border}95`,
     padding: "5px 10px",
     borderRadius: 999,
     color: PALETTE.primary,
