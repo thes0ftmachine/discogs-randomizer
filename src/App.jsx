@@ -895,13 +895,13 @@ function DiscoverTab() {
             🌀 Obscurer
           </button>
           <button style={{ ...styles.modeButton, ...(loading ? styles.modeButtonDisabled : {}) }} onClick={handleHiddenGem} disabled={loading}>
-            💎 > 4.2 rating + < 100 Haves
+            💎 High ratings, low haves
           </button>
         </div>
       ) : (
         <div style={styles.discoveryModeRow}>
           <button style={{ ...styles.modeButton, ...(loading ? styles.modeButtonDisabled : {}) }} onClick={handleHiddenGem} disabled={loading}>
-            💎 > 4.2 rating + < 100 Haves
+            💎 High ratings low haves
           </button>
         </div>
       )}
