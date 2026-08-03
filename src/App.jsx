@@ -351,6 +351,41 @@ export default function App() {
           from { opacity: 0; transform: translateY(6px); }
           to { opacity: 1; transform: translateY(0); }
         }
+
+ @keyframes discoveryCardReveal {
+    from { opacity: 0; transform: translateY(14px) scale(0.97); }
+    to { opacity: 1; transform: translateY(0) scale(1); }
+  }
+  .discovery-card-reveal {
+    animation: discoveryCardReveal 0.45s cubic-bezier(0.16, 1, 0.3, 1);
+  }
+  .discovery-stagger > * {
+    opacity: 0;
+    animation: discoveryFadeIn 0.4s ease forwards;
+  }
+  .discovery-stagger > *:nth-child(1) { animation-delay: 0.08s; }
+  .discovery-stagger > *:nth-child(2) { animation-delay: 0.14s; }
+  .discovery-stagger > *:nth-child(3) { animation-delay: 0.20s; }
+  .discovery-stagger > *:nth-child(4) { animation-delay: 0.26s; }
+  .discovery-stagger > *:nth-child(n+5) { animation-delay: 0.32s; }
+
+  @keyframes discoveryFadeIn {
+    from { opacity: 0; transform: translateY(6px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+  @keyframes discoveryImageSharpen {
+    from { filter: blur(10px); opacity: 0.4; }
+    to { filter: blur(0); opacity: 1; }
+  }
+  @keyframes discoverySpin {
+    to { transform: rotate(360deg); }
+  }
+  .discovery-cover-reveal {
+    animation: discoveryImageSharpen 0.4s ease;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .discovery-cover-reveal, .discovery-card-reveal, .discovery-stagger > * { animation: none; opacity: 1; }
+  }
       
       @keyframes discoveryRecordSpin {
         to { transform: rotate(360deg); }
@@ -799,7 +834,7 @@ function DiscoverTab() {
       </div>
 
       {result && (
-        <div style={{ ...styles.card, ...(loading ? styles.cardDimmed : {}) }} ref={resultRef}>
+        <div className="discovery-card-reveal" key={result.id} style={{ ...styles.card, ...(loading ? styles.cardDimmed : {}) }} ref={resultRef}>
           <div style={styles.coverWrap}>
             <a href={releaseUrl} target="_blank" rel="noreferrer" style={styles.coverLink} aria-label={`View ${title} on Discogs`}>
               <SmartImage
@@ -831,7 +866,7 @@ function DiscoverTab() {
               </>
             )}
           </div>
-          <div style={styles.cardBody}>
+          <div className="discovery-stagger" style={styles.cardBody}>
             <h2 style={styles.cardTitle}>
               <a href={releaseUrl} target="_blank" rel="noreferrer" style={styles.titleLink}>{title}</a>
             </h2>
@@ -1181,12 +1216,13 @@ function HigherLowerGame() {
 
       {champion && challenger && (
         <div style={styles.duelRow}>
-          <GameCard release={champion} statMeta={statMeta} role="Champion" statRevealed value={champion.value} />
+          <GameCard release={champion} statMeta={statMeta} role="Champion" statRevealed value={champion.value} key={champion.pick.id} />
           <div style={styles.vsCol}>
             <span style={styles.vsText}>vs</span>
           </div>
           <GameCard
-            release={challenger}
+  release={challenger}
+  key={challenger.pick.id}
             statMeta={statMeta}
             role="Challenger"
             statRevealed={revealed}
@@ -1216,7 +1252,7 @@ function GameCard({ release, statMeta, role, statRevealed, value, resultBanner }
   const cover = detail?.images?.[0]?.uri || detail?.images?.[0]?.uri150 || pick?.cover_image || null;
 
   return (
-    <div style={styles.gameCard}>
+    <div className="discovery-card-reveal" style={styles.gameCard}>
       <span style={styles.roleLabel}>{role}</span>
       {cover ? (
         <img key={cover} className="discovery-cover-reveal" src={cover} alt={pick.title} style={styles.gameCover} />
@@ -1405,7 +1441,7 @@ function GuessGenreGame() {
       {loading && !round && <div style={styles.emptyBox}>Pulling a cover…</div>}
 
       {round && (
-        <div style={styles.genreCard}>
+        <div className="discovery-card-reveal" key={round.pick.id} style={styles.genreCard}>
           <div style={styles.coverWrap}>
             {cover ? (
               <img key={cover} className="discovery-cover-reveal" src={cover} alt={phase === "revealed" ? round.pick.title : "Guess the genre"} style={styles.genreCover} />
