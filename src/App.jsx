@@ -167,33 +167,88 @@ const PALETTE = {
 function SmartImage({ src, alt, style, placeholderStyle, placeholderText = "No image" }) {
   const [attempt, setAttempt] = useState(0);
   const [failed, setFailed] = useState(false);
+  const [revealed, setRevealed] = useState(false);
+  const canvasRef = useRef(null);
+  const containerRef = useRef(null);
 
   useEffect(() => {
     setAttempt(0);
     setFailed(false);
+    setRevealed(false);
   }, [src]);
+
+  useEffect(() => {
+    if (!src || failed) return;
+    let cancelled = false;
+    const effectiveSrc = attempt === 0 ? src : src + (src.includes("?") ? "&" : "?") + "retry=" + attempt;
+    const img = new Image();
+
+    img.onload = () => {
+      if (cancelled) return;
+      const canvas = canvasRef.current;
+      const box = containerRef.current;
+      if (!canvas || !box) return;
+
+      const W = (canvas.width = box.clientWidth || 400);
+      const H = (canvas.height = box.clientHeight || 400);
+      const ctx = canvas.getContext("2d");
+
+      // Coarse -> fine block sizes. Each step draws the source into a tiny offscreen
+      // canvas, then blows it up with smoothing off — that upscale is what produces
+      // the blocky look. Last step is a normal full-res draw.
+      const steps = [28, 14, 7, 3, 1];
+      let i = 0;
+
+      function drawStep() {
+        if (cancelled) return;
+        const block = steps[i];
+        if (block === 1) {
+          ctx.imageSmoothingEnabled = true;
+          ctx.clearRect(0, 0, W, H);
+          ctx.drawImage(img, 0, 0, W, H);
+          setRevealed(true);
+          return;
+        }
+        const w = Math.max(1, Math.round(W / block));
+        const h = Math.max(1, Math.round(H / block));
+        const tiny = document.createElement("canvas");
+        tiny.width = w;
+        tiny.height = h;
+        tiny.getContext("2d").drawImage(img, 0, 0, w, h);
+
+        ctx.imageSmoothingEnabled = false;
+        ctx.clearRect(0, 0, W, H);
+        ctx.drawImage(tiny, 0, 0, w, h, 0, 0, W, H);
+
+        i++;
+        setTimeout(() => requestAnimationFrame(drawStep), 55);
+      }
+      requestAnimationFrame(drawStep);
+    };
+
+    img.onerror = () => {
+      if (cancelled) return;
+      if (attempt < 1) setTimeout(() => setAttempt((a) => a + 1), 400);
+      else setFailed(true);
+    };
+
+    img.src = effectiveSrc;
+    return () => {
+      cancelled = true;
+    };
+  }, [src, attempt, failed]);
 
   if (!src || failed) {
     return <div style={{ ...style, ...placeholderStyle }}>{!src ? placeholderText : "Image unavailable"}</div>;
   }
 
-  const effectiveSrc = attempt === 0 ? src : src + (src.includes("?") ? "&" : "?") + "retry=" + attempt;
-
   return (
-    <img
-      key={effectiveSrc}
-      className="discovery-cover-reveal"
-      src={effectiveSrc}
-      alt={alt}
-      style={style}
-      onError={() => {
-        if (attempt < 1) {
-          setTimeout(() => setAttempt((a) => a + 1), 400);
-        } else {
-          setFailed(true);
-        }
-      }}
-    />
+    <div ref={containerRef} style={style} role="img" aria-label={alt}>
+      <canvas
+        ref={canvasRef}
+        style={{ width: "100%", height: "100%", display: "block", opacity: revealed ? 1 : 0.98 }}
+      />
+    </div>
   );
 }
 
