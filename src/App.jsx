@@ -1307,12 +1307,18 @@ function GameCard({ release, statMeta, role, statRevealed, value, resultBanner }
   const cover = detail?.images?.[0]?.uri || detail?.images?.[0]?.uri150 || pick?.cover_image || null;
 
   return (
-<SmartImage
-  src={cover}
-  alt={pick.title}
-  style={styles.gameCover}
-  placeholderStyle={styles.coverPlaceholder}
-/>
+    <div className="discovery-card-reveal" style={styles.gameCard}>
+      <span style={styles.roleLabel}>{role}</span>
+return (
+    <div className="discovery-card-reveal" style={styles.gameCard}>
+      <span style={styles.roleLabel}>{role}</span>
+      <SmartImage
+        src={cover}
+        alt={pick.title}
+        style={styles.gameCover}
+        placeholderStyle={styles.coverPlaceholder}
+      />
+      <div style={styles.gameCardBody}>
       <div style={styles.gameCardBody}>
         <p style={styles.gameCardTitle}>{pick.title}</p>
         <p style={styles.gameCardStat}>
