@@ -85,19 +85,27 @@ const GENRE_STYLES = {
     "Space-Age"
   ],
   "Latin": [
+    "Afro-Cuban",
     "Boogaloo",
     "Bossa Nova",
+    "Cha-Cha",
     "Cumbia",
+    "Guaracha",
+    "Mambo",
     "MPB",
-    "Salsa"
+    "Salsa",
+    "Tango"
   ],
   "Pop": [
     "Ballad",
+    "Bollywood",
     "Bubblegum",
     "Chanson",
     "City Pop",
     "Europop",
     "Indie Pop",
+    "J-pop",
+    "K-pop",
     "Kayōkyoku",
     "Synth-pop",
     "Vocal"
@@ -110,21 +118,30 @@ const GENRE_STYLES = {
   ],
   "Rock": [
     "AOR",
+    "Alternative Rock",
+    "Art Rock",
     "Black Metal",
+    "Blues Rock",
+    "Classic Rock",
+    "Country Rock",
     "Death Metal",
     "Doom Metal",
     "Folk Rock",
     "Garage Rock",
+    "Glam",
     "Heavy Metal",
+    "Indie Rock",
     "Krautrock",
+    "New Wave",
     "Nu Metal",
     "Post-Punk",
+    "Power Pop",
     "Prog Rock",
     "Psychedelic Rock",
     "Punk",
     "Shoegaze",
     "Sludge Metal",
-    "Speed Metal",
+    "Soft Rock",
     "Thrash"
   ]
 };
@@ -144,8 +161,89 @@ const COUNTRIES = [
 // more than one, we broaden the query and filter candidates client-side instead.
 const FORMAT_OPTIONS = ["Vinyl", "LP", "CD", "Cassette", "7\"", "10\"", "12\"", "Box Set"];
 
+// Warm-neutral palette — leans toward "flipping through record bins" rather than a
+// generic utilitarian gray/white/black app.
+const PALETTE = {
+  bg: "#F5F3EE",
+  card: "#FFFFFF",
+  border: "#DDD8CE",
+  borderStrong: "#C9C2B2",
+  primary: "#222222",
+  muted: "#75705F",
+  mutedLight: "#948E7C",
+  accent: "#598396",
+  accentDark: "#2754a8",
+  success: "#4E8B5D",
+  danger: "#B3402E",
+  warn: "#8A6A1F",
+};
+
+// Discogs' image CDN occasionally 404s on an otherwise valid URL. Rather than giving up
+// immediately, retry the same URL once (with a cache-busting param) before falling back to
+// a placeholder — smooths over what's usually just a transient hiccup.
+function SmartImage({ src, alt, style, placeholderStyle, placeholderText = "No image" }) {
+  const [attempt, setAttempt] = useState(0);
+  const [failed, setFailed] = useState(false);
+
+  useEffect(() => {
+    setAttempt(0);
+    setFailed(false);
+  }, [src]);
+
+  if (!src || failed) {
+    return <div style={{ ...style, ...placeholderStyle }}>{!src ? placeholderText : "Image unavailable"}</div>;
+  }
+
+  const effectiveSrc = attempt === 0 ? src : src + (src.includes("?") ? "&" : "?") + "retry=" + attempt;
+
+  return (
+    <img
+      key={effectiveSrc}
+      className="discovery-cover-reveal"
+      src={effectiveSrc}
+      alt={alt}
+      style={style}
+      onError={() => {
+        if (attempt < 1) {
+          setTimeout(() => setAttempt((a) => a + 1), 400);
+        } else {
+          setFailed(true);
+        }
+      }}
+    />
+  );
+}
+
 // token should allow more api calls per minute
 const detailCache = new Map();
+
+// Decorative loading copy — the "fake number is fine as long as it reads as decorative"
+// idea, mixed with plain honest copy so it doesn't feel gimmicky every single time.
+const DIG_MESSAGES = [
+  "Digging through crates…",
+  "Digging…",
+  "Flipping through the stacks…",
+  "Searching a few million releases…",
+  "Blowing the dust off a sleeve…",
+];
+
+// Discogs' search result "title" field is "Artist - Title" combined; the full release
+// detail has clean separate fields. Prefer the clean version, fall back to a best-effort
+// split on the first " - " (imperfect for titles that contain " - " themselves).
+function splitArtistTitle(result, detail) {
+  if (detail?.title && detail?.artists?.length) {
+    return { artist: detail.artists.map((a) => a.name).join(", "), title: detail.title };
+  }
+  const raw = result?.title || "";
+  const idx = raw.indexOf(" - ");
+  if (idx === -1) return { artist: "", title: raw };
+  return { artist: raw.slice(0, idx), title: raw.slice(idx + 3) };
+}
+
+function renderStars(average) {
+  const rounded = Math.round(average);
+  return "★".repeat(Math.max(0, Math.min(5, rounded))) + "☆".repeat(Math.max(0, 5 - rounded));
+}
 
 function randomYearInDecade(decade) {
   if (decade === "Any Decade") return null;
@@ -180,31 +278,174 @@ async function discogsFetchDetail(resourceUrl, signal) {
   return detail;
 }
 
-// Shared random-pick engine: probe for total matches, jump to a random page, grab one item.
-async function randomReleaseSearch(baseParams, excludeId, signal) {
-  const probeParams = { ...baseParams, per_page: "1", page: "1" };
-  const probe = await discogsFetch(probeParams, signal);
-  const totalItems = probe?.pagination?.items || 0;
-  if (totalItems === 0) return null;
+// Callers pass exclusions in whatever shape is convenient — a Set of seen ids, a single id,
+// or nothing at all. Normalizing here means a bare id or a null can't blow up the filter below.
+function toIdSet(excluded) {
+  if (excluded instanceof Set) return excluded;
+  if (Array.isArray(excluded)) return new Set(excluded.filter((v) => v != null));
+  if (excluded == null) return new Set();
+  return new Set([excluded]);
+}
 
-  const perPage = 50;
-  const totalPages = Math.min(Math.ceil(totalItems / perPage), 400);
-  const targetPage = 1 + Math.floor(Math.random() * totalPages);
+// Discogs stops serving search results somewhere around the 10,000th item, so there's no
+// point rolling a page number beyond that — deep pages just error or come back empty.
+const SEARCH_PER_PAGE = 100; // Discogs' max
+const MAX_SAMPLE_PAGES = 100; // 100 × 100 = the ~10k ceiling
 
-  const pageParams = { ...baseParams, per_page: String(perPage), page: String(targetPage) };
-  const pageData = await discogsFetch(pageParams, signal);
-  let items = (pageData.results || []).filter((r) => r.type === "release" || !r.type);
-  if (excludeId) items = items.filter((r) => r.id !== excludeId);
+// Shared random-pick engine: read the match count off page one, jump to a random page,
+// grab one item. Page one doubles as the count probe so a draw costs 1–2 calls, not 4.
+async function randomReleaseSearch(baseParams, excluded, signal) {
+  const excludedIds = toIdSet(excluded);
+  const pageParams = { ...baseParams, per_page: String(SEARCH_PER_PAGE) };
+
+  const firstPage = await discogsFetch({ ...pageParams, page: "1" }, signal);
+  if (!firstPage?.pagination?.items) return null;
+
+  const totalPages = Math.min(firstPage.pagination.pages || 1, MAX_SAMPLE_PAGES);
+  let response = firstPage;
+
+  if (totalPages > 1) {
+    const page = 1 + Math.floor(Math.random() * totalPages);
+    if (page !== 1) {
+      try {
+        response = await discogsFetch({ ...pageParams, page: String(page) }, signal);
+      } catch (e) {
+        if (e.name === "AbortError") throw e;
+        response = firstPage; // deep page hiccuped — fall back to what we already have
+      }
+    }
+  }
+
+  const items = (response.results || []).filter((r) =>
+    (r.type === "release" || !r.type) && !excludedIds.has(r.id) && !(r.master_id && excludedIds.has(r.master_id))
+  );
   if (items.length === 0) return null;
 
   return shuffle(items)[0];
 }
 
+// ============================== COLLECTION MODE ==============================
+// Discogs' collection endpoint doesn't accept genre/style/decade/format filters — it just
+// returns pages of everything in a folder. So instead of one search per draw (like the
+// global-catalog flow above), we page through the whole collection once per username, cache
+// it, and filter/sample client-side against that cached list from then on.
+
+const COLLECTION_PER_PAGE = 100;
+
+async function fetchFullCollection(username, signal, onProgress) {
+  let page = 1;
+  let pages = 1;
+  const items = [];
+  do {
+    const data = await apiFetch(
+      { kind: "collection", username, page: String(page), per_page: String(COLLECTION_PER_PAGE) },
+      signal
+    );
+    pages = data?.pagination?.pages || 1;
+    items.push(...(data?.releases || []));
+    onProgress?.(items.length, data?.pagination?.items || items.length);
+    page++;
+  } while (page <= pages);
+  return items;
+}
+
+// Reshapes a Discogs collection entry into the same rough shape as a /database/search
+// result, so the rest of the app (rendering, detail lookups, exclusion tracking) doesn't
+// need to know whether a pick came from the global catalog or a personal collection.
+function collectionItemToPick(item) {
+  const info = item.basic_information || {};
+  const artistNames = (info.artists || []).map((a) => a.name).filter(Boolean).join(", ");
+  return {
+    id: info.id,
+    master_id: info.master_id || null,
+    resource_url: info.resource_url,
+    title: artistNames ? `${artistNames} - ${info.title}` : info.title,
+    year: info.year || null,
+    country: null, // not exposed by the collection endpoint
+    genre: info.genres || [],
+    style: info.styles || [],
+    format: (info.formats || []).flatMap((f) => [f.name, ...(f.descriptions || [])]).filter(Boolean),
+    cover_image: info.cover_image || info.thumb || null,
+    thumb: info.thumb || null,
+    uri: info.id ? `/release/${info.id}` : null,
+    label: (info.labels || []).map((l) => l.name),
+  };
+}
+
+function collectionPickMatchesFilters(pick, filters) {
+  const { genre, style, decade, formats } = filters;
+  if (genre && genre !== "Any Genre" && !(pick.genre || []).includes(genre)) return false;
+  if (style && !(pick.style || []).includes(style)) return false;
+  if (decade && decade !== "Any Decade") {
+    const start = parseInt(decade.slice(0, 4), 10);
+    const y = Number(pick.year);
+    if (!y || y < start || y >= start + 10) return false;
+  }
+  if (formats && formats.length > 0) {
+    const matches = formats.some((f) => (pick.format || []).some((pf) => pf.toLowerCase().includes(f.toLowerCase())));
+    if (!matches) return false;
+  }
+  return true;
+}
+
+// Collection-scoped counterpart to randomReleaseSearch. Since the whole collection is
+// already in memory, this filters + shuffles once instead of retrying network calls; when a
+// detail check is needed (rating, artwork, custom extraCheck) it walks the shuffled
+// candidates until one clears it or the candidate pool runs out.
+async function randomFromCollection(items, filters, excluded, needsDetail, extraCheck, signal) {
+  const excludedIds = toIdSet(excluded);
+  const candidates = shuffle(
+    (items || [])
+      .map(collectionItemToPick)
+      .filter((p) => p.id && !excludedIds.has(p.id) && !(p.master_id && excludedIds.has(p.master_id)))
+      .filter((p) => collectionPickMatchesFilters(p, filters))
+  );
+  if (candidates.length === 0) return { found: null, foundDetail: null, anyResultsAtAll: false };
+  if (!needsDetail) return { found: candidates[0], foundDetail: null, anyResultsAtAll: true };
+
+  const maxCheck = Math.min(candidates.length, 15);
+  for (let i = 0; i < maxCheck; i++) {
+    const pick = candidates[i];
+    try {
+      const full = await discogsFetchDetail(pick.resource_url, signal);
+      if (extraCheck && !extraCheck(full, pick)) continue;
+      return { found: pick, foundDetail: full, anyResultsAtAll: true };
+    } catch (e) {
+      if (e.name === "AbortError") throw e;
+      continue;
+    }
+  }
+  return { found: null, foundDetail: null, anyResultsAtAll: true };
+}
+
 export default function App() {
   const [tab, setTab] = useState("discover"); // 'discover' | 'games'
+  const [collectionSource, setCollectionSource] = useState(null); // { username } | null
+  const [collectionItems, setCollectionItems] = useState(null); // cached array, or null if not connected
+  const [collectionLoading, setCollectionLoading] = useState(false);
+  const [collectionError, setCollectionError] = useState("");
 
   return (
     <div style={styles.page}>
+      <style>{`
+        @keyframes discoveryFadeIn {
+          from { opacity: 0; transform: translateY(6px); }
+          to { opacity: 1; transform: translateY(0); }
+        }
+        @keyframes discoveryImageSharpen {
+          from { filter: blur(10px); opacity: 0.4; }
+          to { filter: blur(0); opacity: 1; }
+        }
+        @keyframes discoverySpin {
+          to { transform: rotate(360deg); }
+        }
+        .discovery-cover-reveal {
+          animation: discoveryImageSharpen 0.4s ease;
+        }
+        @media (prefers-reduced-motion: reduce) {
+          .discovery-cover-reveal { animation: none; }
+        }
+      `}</style>
       <div style={styles.container}>
         <header style={styles.header}>
           <h1 style={styles.title}>Random Discovery</h1>
@@ -226,15 +467,101 @@ export default function App() {
           </button>
         </div>
 
-        {tab === "discover" ? <DiscoverTab /> : <GamesTab />}
+        <CollectionBar
+          collectionSource={collectionSource}
+          setCollectionSource={setCollectionSource}
+          collectionItems={collectionItems}
+          setCollectionItems={setCollectionItems}
+          loading={collectionLoading}
+          setLoading={setCollectionLoading}
+          error={collectionError}
+          setError={setCollectionError}
+        />
+
+        {tab === "discover" ? (
+          <DiscoverTab collectionSource={collectionSource} collectionItems={collectionItems} />
+        ) : (
+          <GamesTab collectionSource={collectionSource} collectionItems={collectionItems} />
+        )}
       </div>
+    </div>
+  );
+}
+
+// ============================== COLLECTION BAR ==============================
+// Always-visible strip between the tabs and whichever tab is active. Connecting here scopes
+// both Discover and Games to the connected collection — it isn't a separate destination.
+
+function CollectionBar({ collectionSource, setCollectionSource, collectionItems, setCollectionItems, loading, setLoading, error, setError }) {
+  const [draftUsername, setDraftUsername] = useState("");
+  const requestRef = useRef(null);
+
+  async function connect(username) {
+    requestRef.current?.abort();
+    const controller = new AbortController();
+    requestRef.current = controller;
+    setError("");
+    setLoading(true);
+    setCollectionItems(null);
+    try {
+      const items = await fetchFullCollection(username, controller.signal);
+      if (controller.signal.aborted) return;
+      if (items.length === 0) {
+        setError("That collection came back empty — double check the username, or that the collection isn't empty.");
+        setLoading(false);
+        return;
+      }
+      setCollectionSource({ username });
+      setCollectionItems(items);
+      setLoading(false);
+    } catch (e) {
+      if (e.name === "AbortError") return;
+      setError(e.message || "Couldn't load that collection.");
+      setLoading(false);
+    }
+  }
+
+  function disconnect() {
+    requestRef.current?.abort();
+    setCollectionSource(null);
+    setCollectionItems(null);
+    setError("");
+  }
+
+  if (collectionSource) {
+    return (
+      <div style={styles.collectionBar}>
+        <span>🔒 Playing from <strong>{collectionSource.username}</strong>'s collection ({collectionItems?.length ?? 0} releases)</span>
+        <button style={styles.collectionChangeBtn} onClick={disconnect}>Change</button>
+      </div>
+    );
+  }
+
+  return (
+    <div style={styles.collectionBar}>
+      <input
+        style={styles.collectionInput}
+        placeholder="Discogs username"
+        value={draftUsername}
+        onChange={(e) => setDraftUsername(e.target.value)}
+        onKeyDown={(e) => e.key === "Enter" && draftUsername.trim() && connect(draftUsername.trim())}
+        disabled={loading}
+      />
+      <button
+        style={styles.collectionConnectBtn}
+        onClick={() => draftUsername.trim() && connect(draftUsername.trim())}
+        disabled={loading || !draftUsername.trim()}
+      >
+        {loading ? "Loading…" : "Connect"}
+      </button>
+      {error && <p style={{ ...styles.hintText, color: PALETTE.danger, width: "100%" }}>{error}</p>}
     </div>
   );
 }
 
 // ============================== DISCOVER TAB ==============================
 
-function DiscoverTab() {
+function DiscoverTab({ collectionSource, collectionItems }) {
   const [genre, setGenre] = useState("Any Genre");
   const [style, setStyle] = useState("");
   const [decade, setDecade] = useState("Any Decade");
@@ -244,25 +571,54 @@ function DiscoverTab() {
   const [onlyArtwork, setOnlyArtwork] = useState(true);
 
   const [loading, setLoading] = useState(false);
+  const [loadingLabel, setLoadingLabel] = useState("Digging…");
   const [error, setError] = useState("");
   const [result, setResult] = useState(null);
   const [detail, setDetail] = useState(null);
   const [emptyNotice, setEmptyNotice] = useState("");
   const [history, setHistory] = useState([]);
+  const [modeNotice, setModeNotice] = useState("");
+  const [imageIndex, setImageIndex] = useState(0);
 
   const formRef = useRef(null);
   const resultRef = useRef(null);
+  const statusRef = useRef(null);
   const requestRef = useRef(null);
+  const seenIdsRef = useRef(new Set());
+  const weirderCeilingRef = useRef(null);
 
   const styleOptions = useMemo(() => GENRE_STYLES[genre] || [], [genre]);
 
-  // Once a result lands, bring the card to the top of the viewport — handy on mobile where
+  // The discovery-mode buttons sit below the card, so a press from down there would
+  // otherwise kick off a search with no visible sign anything is happening. Ride up to the
+  // dig banner the moment a search starts…
+  useEffect(() => {
+    if (loading) {
+      statusRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
+    }
+  }, [loading]);
+
+  // …then back down to the card once a result lands. Also handy on mobile generally, where
   // the filter form pushes the card below the fold.
   useEffect(() => {
     if (result && resultRef.current) {
       resultRef.current.scrollIntoView({ behavior: "smooth", block: "start" });
     }
   }, [result]);
+
+  // A dig that comes back empty or errors is still an answer — make sure it's on screen
+  // rather than leaving the person parked at the bottom wondering what happened.
+  useEffect(() => {
+    if ((error || emptyNotice) && statusRef.current) {
+      statusRef.current.scrollIntoView({ behavior: "smooth", block: "center" });
+    }
+  }, [error, emptyNotice]);
+
+  // Each new pick starts back at its first image rather than whatever slide the previous
+  // release happened to be left on.
+  useEffect(() => {
+    setImageIndex(0);
+  }, [result?.id]);
 
   function scrollToFilters() {
     formRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
@@ -282,102 +638,231 @@ function DiscoverTab() {
     return params;
   }
 
-  async function findRelease() {
+  // Generalized search — the normal "Find something" button calls this with no overrides;
+  // the discovery-mode buttons (Rabbit Hole, Hidden Gem, Another Like This, Weirder) call it
+  // with a genre/style/decade pinned to the current result and/or an extraCheck predicate
+  // evaluated against the full release detail.
+  async function findRelease(opts = {}) {
+    const { genreOverride, styleOverride, decadeOverride, extraCheck, syncForm = false, label } = opts;
     requestRef.current?.abort();
     const controller = new AbortController();
     requestRef.current = controller;
     setLoading(true);
+    setLoadingLabel(label || DIG_MESSAGES[Math.floor(Math.random() * DIG_MESSAGES.length)]);
     setError("");
     setEmptyNotice("");
-    setResult(null);
-    setDetail(null);
+    setModeNotice("");
     try {
-      const year = randomYearInDecade(decade);
-      const baseParams = buildParams(year);
       const needsClientFormatCheck = formats.length > 1;
       const needsRatingCheck = minRating > 0;
-      // Even with no extra filters, give it a few attempts — Discogs' search endpoint
-      // occasionally throws a transient 404/429 on an otherwise valid request, and a single
-      // hiccup shouldn't kill the whole search.
-      const maxAttempts = needsClientFormatCheck || needsRatingCheck ? 10 : 4;
+      const needsDetailForSelection = needsRatingCheck || onlyArtwork || !!extraCheck;
+      const maxAttempts = 10;
+      const inCollectionMode = !!(collectionItems && collectionItems.length);
 
       let found = null;
       let foundDetail = null;
       let anyResultsAtAll = false;
 
-      for (let i = 0; i < maxAttempts; i++) {
-        if (i > 0) await sleep(150);
-
-        let pick;
-        try {
-          pick = await randomReleaseSearch(baseParams, null, controller.signal);
-        } catch (e) {
-          if (String(e?.message || "").includes("rate-limiting")) await sleep(1200);
-          continue; // transient hiccup on the search itself — retry rather than failing outright
-        }
-        if (!pick) break; // Discogs genuinely has zero matches for these filters
-        anyResultsAtAll = true;
-
-        if (needsClientFormatCheck) {
-          const pickFormats = pick.format || [];
-          const matches = formats.some((f) => pickFormats.includes(f));
-          if (!matches) continue;
-        }
-
-        if (needsRatingCheck || onlyArtwork) {
-          try {
-            const full = await discogsFetchDetail(pick.resource_url, controller.signal);
+      if (inCollectionMode) {
+        // Collection mode: filter the cached collection client-side rather than hitting search.
+        const filters = {
+          genre: genreOverride || genre,
+          style: styleOverride !== undefined ? styleOverride : style,
+          decade: decadeOverride || decade,
+          formats,
+        };
+        const outcome = await randomFromCollection(
+          collectionItems,
+          filters,
+          seenIdsRef.current,
+          needsDetailForSelection,
+          (full, pick) => {
+            if (onlyArtwork && !full.images?.some((image) => image.uri || image.uri150)) return false;
             const rating = full.community?.rating;
-            if (onlyArtwork && !full.images?.some((image) => image.uri || image.uri150)) continue;
-            if (needsRatingCheck && (!rating || rating.count === 0 || rating.average < minRating)) continue;
-            found = pick;
-            foundDetail = full;
-            break;
-          } catch {
-            continue;
+            if (needsRatingCheck && (!rating || rating.count === 0 || rating.average < minRating)) return false;
+            if (extraCheck && !extraCheck(full, pick)) return false;
+            return true;
+          },
+          controller.signal
+        );
+        found = outcome.found;
+        foundDetail = outcome.foundDetail;
+        anyResultsAtAll = outcome.anyResultsAtAll;
+      } else {
+        for (let i = 0; i < maxAttempts; i++) {
+          if (i > 0) await sleep(150);
+          const yearForAttempt = randomYearInDecade(decadeOverride || decade);
+          const baseParams = buildParams(yearForAttempt);
+          if (genreOverride) baseParams.genre = genreOverride;
+          if (styleOverride !== undefined) {
+            if (styleOverride) baseParams.style = styleOverride;
+            else delete baseParams.style;
           }
-        } else {
-          found = pick;
-          break;
+
+          let pick;
+          try {
+            pick = await randomReleaseSearch(baseParams, seenIdsRef.current, controller.signal);
+          } catch (e) {
+            if (e.name === "AbortError") return;
+            if (String(e?.message || "").includes("rate-limiting")) await sleep(1200);
+            continue; // transient hiccup on the search itself — retry rather than failing outright
+          }
+          if (!pick) break; // Discogs genuinely has zero matches for these filters
+          anyResultsAtAll = true;
+
+          if (needsClientFormatCheck) {
+            const pickFormats = pick.format || [];
+            const matches = formats.some((f) => pickFormats.includes(f));
+            if (!matches) continue;
+          }
+
+          if (needsDetailForSelection) {
+            try {
+              const full = await discogsFetchDetail(pick.resource_url, controller.signal);
+              const rating = full.community?.rating;
+              if (onlyArtwork && !full.images?.some((image) => image.uri || image.uri150)) continue;
+              if (needsRatingCheck && (!rating || rating.count === 0 || rating.average < minRating)) continue;
+              if (extraCheck && !extraCheck(full, pick)) continue;
+              found = pick;
+              foundDetail = full;
+              break;
+            } catch (e) {
+              if (e.name === "AbortError") return;
+              continue;
+            }
+          } else {
+            found = pick;
+            break;
+          }
         }
       }
 
       if (controller.signal.aborted) return;
       if (!found) {
         setEmptyNotice(
-          anyResultsAtAll
-            ? "Found matches for genre/style/decade/country, but couldn't find one that also cleared the format or rating filter after several tries. Try loosening the rating minimum or format selection."
-            : "Nothing matched that combination. Try loosening a filter — style and country are the most restrictive."
+          inCollectionMode
+            ? (anyResultsAtAll
+                ? "Found matches in the collection, but none cleared the extra filters. Try loosening things a bit."
+                : "Nothing in this collection matched that combination. Try loosening a filter.")
+            : (anyResultsAtAll
+                ? "Found matches, but couldn't find one that also cleared the extra filters after several tries. Try loosening things a bit."
+                : "Nothing matched that combination. Try loosening a filter — style and country are the most restrictive.")
         );
         setLoading(false);
-        return;
+        return null;
+      }
+
+      if (syncForm) {
+        if (genreOverride) setGenre(genreOverride);
+        if (styleOverride !== undefined) setStyle(styleOverride || "");
       }
 
       setResult(found);
+      seenIdsRef.current.add(found.id);
+      if (found.master_id) seenIdsRef.current.add(found.master_id);
       setHistory((h) => [found, ...h].slice(0, 6));
       setLoading(false);
 
-      if (foundDetail) {
-        setDetail(foundDetail);
+      let finalDetail = foundDetail;
+      if (finalDetail) {
+        setDetail(finalDetail);
       } else if (found.resource_url) {
         try {
-          const full = await discogsFetchDetail(found.resource_url);
-          setDetail(full);
+          finalDetail = await discogsFetchDetail(found.resource_url);
+          setDetail(finalDetail);
         } catch {
           // Non-fatal — card still renders with the search result's fallback fields.
         }
       }
+
+      return { pick: found, detail: finalDetail };
     } catch (e) {
       setError(e.message || "Something went wrong. Don't blame me. It's more than likely Discogs. Try again in a second.");
       setLoading(false);
+      return null;
     }
   }
 
-  const coverSrc = detail?.images?.[0]?.uri || detail?.images?.[0]?.uri150 || result?.cover_image || null;
+  function primaryGenre() {
+    return detail?.genres?.[0] || result?.genre?.[0] || null;
+  }
+
+  // "Rabbit Hole" — click a style chip on the current result to drill straight into that
+  // genre + style combination instead of going back to the form.
+  function handleRabbitHole(clickedStyle) {
+    const g = primaryGenre();
+    if (!g) return;
+    weirderCeilingRef.current = null;
+    setModeNotice(`Down the rabbit hole: ${g} → ${clickedStyle}`);
+    findRelease({ genreOverride: g, styleOverride: clickedStyle, syncForm: true, label: "Falling down the rabbit hole…" });
+  }
+
+  // "Hidden Gem" — well-loved but rarely owned: rating > 4.2 with fewer than 100 haves.
+  function handleHiddenGem() {
+    weirderCeilingRef.current = null;
+    setModeNotice("Hunting for a hidden gem (rating > 4.2, under 100 haves)…");
+    findRelease({
+      label: "Hunting for a hidden gem…",
+      extraCheck: (full) => {
+        const r = full.community?.rating;
+        const have = full.community?.have;
+        return !!r && r.count > 0 && r.average > 4.2 && typeof have === "number" && have < 100;
+      },
+    });
+  }
+
+  // "Another Like This" — same genre, same decade as the current result, different artist.
+  function handleAnotherLikeThis() {
+    const g = primaryGenre();
+    if (!g) return;
+    // Search results don't always carry a year, and the detail object sometimes does.
+    // Without one we just drop the decade pin rather than leaving the button inert.
+    const year = Number(result?.year || detail?.year) || null;
+    const decadeLabel = year ? `${Math.floor(year / 10) * 10}s` : null;
+    const excludeArtistIds = new Set((detail?.artists || []).map((a) => a.id));
+    weirderCeilingRef.current = null;
+    setModeNotice(decadeLabel ? `Looking for more ${g}, ${decadeLabel}…` : `Looking for more ${g}…`);
+    findRelease({
+      genreOverride: g,
+      decadeOverride: decadeLabel || undefined,
+      syncForm: true,
+      label: "Finding something in the same vein…",
+      extraCheck: excludeArtistIds.size
+        ? (full) => !(full.artists || []).some((a) => excludeArtistIds.has(a.id))
+        : undefined,
+    });
+  }
+
+  // "Weirder" — each press ratchets the have-count ceiling down within the same genre, so
+  // the results drift toward more obscure territory. Not literal artist-similarity (Discogs
+  // has no such API) — just progressively less-collected releases in the same genre.
+  async function handleWeirder() {
+    const g = primaryGenre(); // may be null — then we just don't pin the genre
+    const baseline = weirderCeilingRef.current ?? detail?.community?.have ?? null;
+    const ceiling = baseline != null ? Math.max(baseline - 1, 0) : null;
+    setModeNotice(ceiling != null ? `Digging weirder (under ${ceiling} haves)…` : "Digging weirder…");
+    const res = await findRelease({
+      genreOverride: g || undefined,
+      label: "Digging weirder…",
+      extraCheck: ceiling != null ? (full) => (full.community?.have ?? Infinity) < ceiling : undefined,
+    });
+    if (res?.detail?.community?.have != null) {
+      weirderCeilingRef.current = res.detail.community.have;
+    }
+  }
+
+  const images = detail?.images || [];
+  const coverSrc = images[imageIndex]?.uri || images[imageIndex]?.uri150 || result?.cover_image || null;
+  const { artist, title } = splitArtistTitle(result, detail);
+  const ratingInfo = detail?.community?.rating;
+  const hasResultContext = !!result;
+  const releaseUrl = result ? "https://www.discogs.com" + (result.uri || "") : "";
 
   return (
     <>
       <div style={styles.form} ref={formRef}>
+        <p style={styles.formHeading}>{collectionSource ? `Find me… (from ${collectionSource.username}'s collection)` : "Find me…"}</p>
+
         <div style={styles.fieldRow}>
           <label style={styles.label}>Genre</label>
           <select
@@ -406,20 +891,30 @@ function DiscoverTab() {
 
         <div style={styles.fieldRow}>
           <label style={styles.label}>Decade</label>
-          <select style={styles.select} value={decade} onChange={(e) => setDecade(e.target.value)}>
+          <div style={styles.chipRow}>
             {DECADES.map((d) => (
-              <option key={d} value={d}>{d}</option>
+              <button
+                type="button"
+                key={d}
+                style={{ ...styles.chip, ...(decade === d ? styles.chipActive : {}) }}
+                onClick={() => setDecade(d)}
+              >
+                {d === "Any Decade" ? "Any" : d}
+              </button>
             ))}
-          </select>
+          </div>
         </div>
 
         <div style={styles.fieldRow}>
           <label style={styles.label}>Country</label>
-          <select style={styles.select} value={country} onChange={(e) => setCountry(e.target.value)}>
+          <select style={styles.select} value={country} onChange={(e) => setCountry(e.target.value)} disabled={!!collectionSource}>
             {COUNTRIES.map((c) => (
               <option key={c} value={c}>{c}</option>
             ))}
           </select>
+          {collectionSource && (
+            <p style={styles.hintText}>Discogs doesn't expose pressing country on collection data, so this filter is off while a collection is connected.</p>
+          )}
         </div>
 
         <div style={styles.fieldRow}>
@@ -470,41 +965,130 @@ function DiscoverTab() {
           Only show releases with artwork
         </label>
 
-        <button style={styles.button} onClick={findRelease} disabled={loading}>
-          {loading ? "Digging…" : "Find something"}
+        <button style={styles.button} onClick={() => findRelease()} disabled={loading}>
+          {loading ? loadingLabel : "Find something"}
         </button>
       </div>
 
-      {error && <div style={styles.errorBox}>{error}</div>}
-      {emptyNotice && <div style={styles.emptyBox}>{emptyNotice}</div>}
+      <div ref={statusRef}>
+        {loading && (
+          <div style={styles.digBox}>
+            <span style={styles.digSpinner} aria-hidden="true" />
+            <span>{loadingLabel}</span>
+          </div>
+        )}
+        {!loading && error && <div style={styles.errorBox}>{error}</div>}
+        {!loading && emptyNotice && <div style={styles.emptyBox}>{emptyNotice}</div>}
+      </div>
 
       {result && (
-        <div style={styles.card} ref={resultRef}>
-          {coverSrc ? (
-            <img src={coverSrc} alt={result.title} style={styles.cover} />
-          ) : (
-            <div style={{ ...styles.cover, ...styles.coverPlaceholder }}>No image</div>
-          )}
+        <div style={{ ...styles.card, ...(loading ? styles.cardDimmed : {}) }} ref={resultRef}>
+          <div style={styles.coverWrap}>
+            <a href={releaseUrl} target="_blank" rel="noreferrer" style={styles.coverLink} aria-label={`View ${title} on Discogs`}>
+              <SmartImage
+                src={coverSrc}
+                alt={title}
+                style={styles.cover}
+                placeholderStyle={styles.coverPlaceholder}
+              />
+            </a>
+            {images.length > 1 && (
+              <>
+                <button
+                  type="button"
+                  aria-label="Previous image"
+                  style={{ ...styles.imageArrow, left: 8 }}
+                  onClick={() => setImageIndex((i) => (i - 1 + images.length) % images.length)}
+                >
+                  ‹
+                </button>
+                <button
+                  type="button"
+                  aria-label="Next image"
+                  style={{ ...styles.imageArrow, right: 8 }}
+                  onClick={() => setImageIndex((i) => (i + 1) % images.length)}
+                >
+                  ›
+                </button>
+                <span style={styles.imageDots}>{imageIndex + 1} / {images.length}</span>
+              </>
+            )}
+          </div>
           <div style={styles.cardBody}>
-            <h2 style={styles.cardTitle}>{result.title}</h2>
-            <div style={styles.metaRow}>
-              {result.year ? <span style={styles.tag}>{result.year}</span> : null}
-              {result.country ? <span style={styles.tag}>{result.country}</span> : null}
-              {(result.format || []).slice(0, 3).map((f) => (
-                <span style={styles.tag} key={f}>{f}</span>
-              ))}
-            </div>
-            {result.label && result.label.length > 0 && (
-              <p style={styles.metaLine}><strong>Label:</strong> {result.label.join(", ")}</p>
-            )}
-            {result.style && result.style.length > 0 && (
-              <p style={styles.metaLine}><strong>Style:</strong> {result.style.join(", ")}</p>
-            )}
-            {result.community && (
-              <p style={styles.metaLine}>
-                <strong>Discogs community:</strong> {result.community.have ?? 0} have it, {result.community.want ?? 0} want it
+            <h2 style={styles.cardTitle}>
+              <a href={releaseUrl} target="_blank" rel="noreferrer" style={styles.titleLink}>{title}</a>
+            </h2>
+            {artist && (
+              <p style={styles.cardArtist}>
+                {detail?.artists?.length ? (
+                  detail.artists.map((a, i) => (
+                    <React.Fragment key={a.id ?? a.name}>
+                      {i > 0 && ", "}
+                      {a.id ? (
+                        <a
+                          href={`https://www.discogs.com/artist/${a.id}`}
+                          target="_blank"
+                          rel="noreferrer"
+                          style={styles.artistLink}
+                        >
+                          {a.name}
+                        </a>
+                      ) : (
+                        a.name
+                      )}
+                    </React.Fragment>
+                  ))
+                ) : (
+                  artist
+                )}
               </p>
             )}
+
+            <p style={styles.cardSubline}>
+              {[result.year, result.country].filter(Boolean).join(" • ")}
+            </p>
+
+            {(detail?.genres || result.genre || []).length > 0 && (
+              <div style={styles.metaRow}>
+                {(detail?.genres || result.genre).map((g) => (
+                  <span style={styles.genreTag} key={g}>{g}</span>
+                ))}
+                {(result.format || []).slice(0, 2).map((f) => (
+                  <span style={styles.tag} key={f}>{f}</span>
+                ))}
+              </div>
+            )}
+
+            {result.style && result.style.length > 0 && (
+              <div style={styles.styleChipRow}>
+                {result.style.map((s) => (
+                  <button
+                    key={s}
+                    type="button"
+                    style={styles.styleChip}
+                    onClick={() => handleRabbitHole(s)}
+                    disabled={loading}
+                    title="Rabbit hole: search this genre + style"
+                  >
+                    🐇 {s}
+                  </button>
+                ))}
+              </div>
+            )}
+
+            {ratingInfo && ratingInfo.count > 0 && (
+              <p style={styles.metaLine}>
+                <span style={styles.stars}>{renderStars(ratingInfo.average)}</span>{" "}
+                <span style={styles.hintText}>{ratingInfo.average.toFixed(2)} ({ratingInfo.count} ratings)</span>
+              </p>
+            )}
+
+            {result.community && (
+              <p style={styles.metaLine}>
+                ❤ {result.community.have ?? 0} have it &nbsp;·&nbsp; ☆ {result.community.want ?? 0} want it
+              </p>
+            )}
+
             {detail && (detail.lowest_price != null || detail.num_for_sale != null) && (
               <p style={styles.metaLine}>
                 <strong>Marketplace:</strong>{" "}
@@ -512,6 +1096,11 @@ function DiscoverTab() {
                 {detail.num_for_sale != null ? ` · ${detail.num_for_sale} for sale` : ""}
               </p>
             )}
+
+            {result.label && result.label.length > 0 && (
+              <p style={styles.metaLine}><strong>Label:</strong> {result.label.join(", ")}</p>
+            )}
+
             <a
               href={"https://www.discogs.com" + (result.uri || "")}
               target="_blank"
@@ -521,6 +1110,28 @@ function DiscoverTab() {
               View on Discogs →
             </a>
           </div>
+        </div>
+      )}
+
+      {modeNotice && <p style={styles.modeNotice}>{modeNotice}</p>}
+
+      {hasResultContext ? (
+        <div style={styles.discoveryModeRow}>
+          <button style={{ ...styles.modeButton, ...(loading ? styles.modeButtonDisabled : {}) }} onClick={handleAnotherLikeThis} disabled={loading}>
+            🔁 Another like this
+          </button>
+          <button style={{ ...styles.modeButton, ...(loading ? styles.modeButtonDisabled : {}) }} onClick={handleWeirder} disabled={loading}>
+            🌀 Obscurer
+          </button>
+          <button style={{ ...styles.modeButton, ...(loading ? styles.modeButtonDisabled : {}) }} onClick={handleHiddenGem} disabled={loading}>
+            💎 Hidden gem
+          </button>
+        </div>
+      ) : (
+        <div style={styles.discoveryModeRow}>
+          <button style={{ ...styles.modeButton, ...(loading ? styles.modeButtonDisabled : {}) }} onClick={handleHiddenGem} disabled={loading}>
+            💎 Hidden gem
+          </button>
         </div>
       )}
 
@@ -535,10 +1146,17 @@ function DiscoverTab() {
           <h3 style={styles.historyTitle}>Recently surfaced</h3>
           <div style={styles.historyRow}>
             {history.slice(1).map((h) => (
-              <div key={h.id} style={styles.historyItem} title={h.title}>
-                {h.thumb ? <img src={h.thumb} alt={h.title} style={styles.historyThumb} /> : <div style={{ ...styles.historyThumb, background: "#e5e5e5" }} />}
+              <a
+                key={h.id}
+                href={"https://www.discogs.com" + (h.uri || "")}
+                target="_blank"
+                rel="noreferrer"
+                style={styles.historyItem}
+                title={h.title}
+              >
+                {h.thumb ? <img src={h.thumb} alt={h.title} style={styles.historyThumb} /> : <div style={{ ...styles.historyThumb, background: PALETTE.border }} />}
                 <span style={styles.historyLabel}>{h.title}</span>
-              </div>
+              </a>
             ))}
           </div>
         </div>
@@ -547,13 +1165,17 @@ function DiscoverTab() {
   );
 }
 
+
 // ============================== GAMES TAB ==============================
 
-function GamesTab() {
+function GamesTab({ collectionSource, collectionItems }) {
   const [game, setGame] = useState("genre"); // 'higherlower' | 'genre'
 
   return (
     <>
+      {collectionSource && (
+        <p style={styles.modeNotice}>Playing within {collectionSource.username}'s collection.</p>
+      )}
       <div style={styles.gameTabRow}>
         <button
           style={{ ...styles.gameTabButton, ...(game === "genre" ? styles.gameTabButtonActive : {}) }}
@@ -569,7 +1191,11 @@ function GamesTab() {
         </button>
       </div>
 
-      {game === "higherlower" ? <HigherLowerGame /> : <GuessGenreGame />}
+      {game === "higherlower" ? (
+        <HigherLowerGame collectionItems={collectionItems} />
+      ) : (
+        <GuessGenreGame collectionItems={collectionItems} />
+      )}
     </>
   );
 }
@@ -597,16 +1223,51 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function drawValidRelease(statKey, excludeId, attempts = 5) {
-  for (let i = 0; i < attempts; i++) {
-    if (i > 0) await sleep(150); // small gap between attempts eases pressure on the unauthenticated rate limit
+// Randomizing the pressing year alongside the genre shrinks each search below Discogs'
+// paging ceiling, so the draw samples the whole catalogue rather than the first 10k rows
+// of its default ranking.
+function randomGameYear() {
+  return 1955 + Math.floor(Math.random() * 69);
+}
+
+async function drawValidRelease(statKey, excludeId, collectionItems, attempts) {
+  const excluded = toIdSet(excludeId);
+
+  if (collectionItems && collectionItems.length) {
+    const maxCollectionAttempts = attempts ?? 20;
+    const candidates = shuffle(
+      collectionItems
+        .map(collectionItemToPick)
+        .filter((p) => p.id && !excluded.has(p.id) && !(p.master_id && excluded.has(p.master_id)))
+    );
+    for (let i = 0; i < Math.min(candidates.length, maxCollectionAttempts); i++) {
+      const pick = candidates[i];
+      try {
+        const detail = await discogsFetchDetail(pick.resource_url);
+        const value = getStatValue(detail, statKey);
+        if (value != null) return { pick, detail, value };
+      } catch {
+        continue;
+      }
+    }
+    return null;
+  }
+
+  // Plenty of obscure vinyl has no active listings, so price needs more swings to land one.
+  const maxAttempts = attempts ?? (statKey === "price" ? 8 : 6);
+
+  for (let i = 0; i < maxAttempts; i++) {
+    if (i > 0) await sleep(150); // small gap between attempts eases pressure on the rate limit
     try {
       // A fully unfiltered vinyl search has tens of millions of matches, far more than our
       // page cap can meaningfully sample, so it ends up skewed toward whatever Discogs'
       // default ranking favors (heavily Electronic). Picking a random genre first and
       // searching within it keeps each genre's odds even instead.
       const genre = GAME_GENRES[Math.floor(Math.random() * GAME_GENRES.length)];
-      const pick = await randomReleaseSearch({ type: "release", format: "Vinyl", genre }, excludeId);
+      const pick = await randomReleaseSearch(
+        { type: "release", format: "Vinyl", genre, year: String(randomGameYear()) },
+        excluded
+      );
       if (!pick) continue;
       const detail = await discogsFetchDetail(pick.resource_url);
       const value = getStatValue(detail, statKey);
@@ -622,7 +1283,7 @@ async function drawValidRelease(statKey, excludeId, attempts = 5) {
   return null;
 }
 
-function HigherLowerGame() {
+function HigherLowerGame({ collectionItems }) {
   const [statKey, setStatKey] = useState("have");
   const [champion, setChampion] = useState(null); // { pick, detail, value }
   const [challenger, setChallenger] = useState(null);
@@ -634,31 +1295,40 @@ function HigherLowerGame() {
   const [error, setError] = useState("");
 
   const statMeta = STAT_OPTIONS.find((s) => s.key === statKey);
+  const runIdRef = useRef(0);
 
   const startNewRound = useCallback(async (key) => {
+    const runId = ++runIdRef.current;
     setLoading(true);
     setError("");
     setRevealed(false);
     setLastCorrect(null);
     setScore(0);
+    // Old cards hold values measured against the previous stat — clearing them stops a
+    // stale pairing from sitting under a mismatched label while the new draw runs.
+    setChampion(null);
+    setChallenger(null);
     try {
-      const first = await drawValidRelease(key, null);
+      const first = await drawValidRelease(key, null, collectionItems);
+      if (runIdRef.current !== runId) return; // a newer round took over
       if (!first) throw new Error("Couldn't find a release... Try waiting a second or just refreshing. Discogs is probably on a bathroom break.");
-      const second = await drawValidRelease(key, first.pick.id);
+      const second = await drawValidRelease(key, first.pick.id, collectionItems);
+      if (runIdRef.current !== runId) return;
       if (!second) throw new Error("Couldn't find a second release with that stat available so try refreshing. Discogs likes to throw fits like this.");
       setChampion(first);
       setChallenger(second);
     } catch (e) {
+      if (runIdRef.current !== runId) return;
       setError(e.message || "Something went wrong. Likely because of Discogs... try again in a few seconds.");
     } finally {
-      setLoading(false);
+      if (runIdRef.current === runId) setLoading(false);
     }
-  }, []);
+  }, [collectionItems]);
 
   useEffect(() => {
     startNewRound(statKey);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [statKey]);
+  }, [statKey, collectionItems]);
 
   async function guess(direction) {
     if (!champion || !challenger || revealed) return;
@@ -678,7 +1348,7 @@ function HigherLowerGame() {
       if (correct) {
         setLoading(true);
         try {
-          const next = await drawValidRelease(statKey, challenger.pick.id);
+          const next = await drawValidRelease(statKey, challenger.pick.id, collectionItems);
           if (!next) throw new Error("Couldn't find a fresh challenger. Try again. If you have no options to do anything, just refresh. Discogs is likely taking a break.");
           setChampion(challenger);
           setChallenger(next);
@@ -760,7 +1430,7 @@ function GameCard({ release, statMeta, role, statRevealed, value, resultBanner }
     <div style={styles.gameCard}>
       <span style={styles.roleLabel}>{role}</span>
       {cover ? (
-        <img src={cover} alt={pick.title} style={styles.gameCover} />
+        <img key={cover} className="discovery-cover-reveal" src={cover} alt={pick.title} style={styles.gameCover} />
       ) : (
         <div style={{ ...styles.gameCover, ...styles.coverPlaceholder }}>No image</div>
       )}
@@ -770,7 +1440,7 @@ function GameCard({ release, statMeta, role, statRevealed, value, resultBanner }
           {statRevealed ? statMeta.format(value) : "??? " + statMeta.label}
         </p>
         {resultBanner && (
-          <p style={{ ...styles.resultBanner, color: resultBanner === "Correct!" ? "#1e7d32" : "#b3261e" }}>
+          <p style={{ ...styles.resultBanner, color: resultBanner === "Correct!" ? PALETTE.success : PALETTE.danger }}>
             {resultBanner}
           </p>
         )}
@@ -826,17 +1496,55 @@ function buildStyleOptions(round) {
   return shuffle([...actual, ...pool.slice(0, decoyCount)]);
 }
 
-async function drawGenreRound(excludeId, attempts = 5) {
-  for (let i = 0; i < attempts; i++) {
+async function drawGenreRound(excludeId, collectionItems, attempts) {
+  const excluded = toIdSet(excludeId);
+
+  if (collectionItems && collectionItems.length) {
+    const maxCollectionAttempts = attempts ?? 20;
+    const candidates = shuffle(
+      collectionItems
+        .map(collectionItemToPick)
+        .filter((p) => p.id && !excluded.has(p.id) && !(p.master_id && excluded.has(p.master_id)))
+        .filter((p) => (p.genre || []).some((g) => GAME_GENRES.includes(g)))
+    );
+    for (let i = 0; i < Math.min(candidates.length, maxCollectionAttempts); i++) {
+      const pick = candidates[i];
+      let detail = null;
+      try {
+        detail = await discogsFetchDetail(pick.resource_url);
+      } catch {
+        continue;
+      }
+      if (!detail?.images?.length && !pick.cover_image) continue;
+      return { pick, detail };
+    }
+    return null;
+  }
+
+  const maxAttempts = attempts ?? 6;
+  for (let i = 0; i < maxAttempts; i++) {
     if (i > 0) await sleep(150);
     try {
       // Same fix as Higher/Lower: search within a randomly chosen genre each attempt so the
       // draw is spread evenly across genres instead of skewed by Discogs' default ranking.
       const genre = GAME_GENRES[Math.floor(Math.random() * GAME_GENRES.length)];
-      const pick = await randomReleaseSearch({ type: "release", format: "Vinyl", genre }, excludeId);
+      const pick = await randomReleaseSearch(
+        { type: "release", format: "Vinyl", genre, year: String(randomGameYear()) },
+        excluded
+      );
       if (!pick) continue;
-      if (!pick.genre || pick.genre.length === 0) continue;
-      const detail = await discogsFetchDetail(pick.resource_url);
+      // The answer has to be one of the buttons on the grid, or the round is unwinnable.
+      if (!(pick.genre || []).some((g) => GAME_GENRES.includes(g))) continue;
+
+      // The search result already carries genre, style and a cover, so the detail lookup is
+      // only an upgrade (full-res image carousel). Don't burn an attempt when it 404s.
+      let detail = null;
+      try {
+        detail = await discogsFetchDetail(pick.resource_url);
+      } catch (e) {
+        if (e.name === "AbortError") throw e;
+      }
+      if (!detail?.images?.length && !pick.cover_image) continue; // nothing to show, no round
       return { pick, detail };
     } catch (e) {
       if (String(e?.message || "").includes("rate-limiting")) await sleep(1200);
@@ -845,7 +1553,7 @@ async function drawGenreRound(excludeId, attempts = 5) {
   return null;
 }
 
-function GuessGenreGame() {
+function GuessGenreGame({ collectionItems }) {
   const [round, setRound] = useState(null); // { pick, detail }
   const [phase, setPhase] = useState("guessing"); // 'guessing' | 'revealed'
   const [guessedGenre, setGuessedGenre] = useState(null);
@@ -858,7 +1566,10 @@ function GuessGenreGame() {
   const [error, setError] = useState("");
   const [imageIndex, setImageIndex] = useState(0);
 
+  const runIdRef = useRef(0);
+
   const startRound = useCallback(async (excludeId) => {
+    const runId = ++runIdRef.current;
     setLoading(true);
     setError("");
     setPhase("guessing");
@@ -867,20 +1578,22 @@ function GuessGenreGame() {
     setBonusStatus(null);
     setImageIndex(0);
     try {
-      const next = await drawGenreRound(excludeId);
+      const next = await drawGenreRound(excludeId, collectionItems);
+      if (runIdRef.current !== runId) return; // a newer round took over
       if (!next) throw new Error("Couldn't pull a fresh release right now. Try again in a moment. Most likely Discogs is just being lazy.");
       setRound(next);
     } catch (e) {
+      if (runIdRef.current !== runId) return;
       setError(e.message || "Something went wrong. And by something, I mean Discogs... it's sooo lazy. Try refreshing.");
     } finally {
-      setLoading(false);
+      if (runIdRef.current === runId) setLoading(false);
     }
-  }, []);
+  }, [collectionItems]);
 
   useEffect(() => {
     startRound(null);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [collectionItems]);
 
   function submitGenreGuess(g) {
     if (phase !== "guessing" || !round) return;
@@ -929,7 +1642,7 @@ function GuessGenreGame() {
         <div style={styles.genreCard}>
           <div style={styles.coverWrap}>
             {cover ? (
-              <img src={cover} alt={phase === "revealed" ? round.pick.title : "Guess the genre"} style={styles.genreCover} />
+              <img key={cover} className="discovery-cover-reveal" src={cover} alt={phase === "revealed" ? round.pick.title : "Guess the genre"} style={styles.genreCover} />
             ) : (
               <div style={{ ...styles.genreCover, ...styles.coverPlaceholder }}>No image</div>
             )}
@@ -976,7 +1689,7 @@ function GuessGenreGame() {
           {phase === "revealed" && (
             <div style={styles.genreRevealBody}>
               <p style={styles.genreRevealTitle}>{round.pick.title}</p>
-              <p style={{ ...styles.genreResultLine, color: genreCorrect ? "#1e7d32" : "#b3261e" }}>
+              <p style={{ ...styles.genreResultLine, color: genreCorrect ? PALETTE.success : PALETTE.danger }}>
                 {genreCorrect ? "✓ Correct!" : `✗ You guessed ${guessedGenre}`}
                 {!genreCorrect && ` — actually ${getGenres(round).join(", ")}`}
               </p>
@@ -999,7 +1712,7 @@ function GuessGenreGame() {
                   <button style={styles.bonusSkip} onClick={() => setBonusStatus("skipped")}>Skip</button>
                 </div>
               ) : (
-                <p style={{ ...styles.genreResultLine, color: bonusStatus === "correct" ? "#1e7d32" : "#666" }}>
+                <p style={{ ...styles.genreResultLine, color: bonusStatus === "correct" ? PALETTE.success : PALETTE.mutedLight }}>
                   {bonusStatus === "correct" ? "✓ Style guessed right!" : `Style: ${actualStyles.join(", ")}`}
                 </p>
               )}
@@ -1020,17 +1733,17 @@ function GuessGenreGame() {
 const styles = {
   page: {
     minHeight: "100vh",
-    background: "#fafafa",
+    background: PALETTE.bg,
     fontFamily: "system-ui, -apple-system, 'Segoe UI', sans-serif",
-    color: "#1a1a1a",
+    color: PALETTE.primary,
     padding: "32px 16px",
   },
   container: { maxWidth: 560, margin: "0 auto" },
   header: { marginBottom: 20 },
   title: { fontSize: 28, fontWeight: 700, margin: 0 },
-  subtitle: { fontSize: 14, color: "#666", marginTop: 6 },
+  subtitle: { fontSize: 14, color: PALETTE.muted, marginTop: 6 },
 
-  tabRow: { display: "flex", gap: 8, marginBottom: 20, borderBottom: "1px solid #e5e5e5" },
+  tabRow: { display: "flex", gap: 8, marginBottom: 20, borderBottom: `1px solid ${PALETTE.border}` },
   tabButton: {
     padding: "10px 4px",
     marginRight: 16,
@@ -1039,158 +1752,279 @@ const styles = {
     background: "none",
     fontSize: 15,
     fontWeight: 600,
-    color: "#888",
+    color: PALETTE.mutedLight,
     cursor: "pointer",
   },
-  tabButtonActive: { color: "#1a1a1a", borderBottomColor: "#1a1a1a" },
+  tabButtonActive: { color: PALETTE.primary, borderBottomColor: PALETTE.accent },
+
+  collectionBar: {
+    display: "flex",
+    alignItems: "center",
+    gap: 8,
+    flexWrap: "wrap",
+    padding: "12px 14px",
+    marginBottom: 18,
+    borderRadius: 10,
+    border: `1px solid ${PALETTE.border}`,
+    background: PALETTE.card,
+    fontSize: 13,
+    color: PALETTE.primary,
+  },
+  collectionInput: {
+    flex: 1,
+    minWidth: 140,
+    padding: "9px 10px",
+    borderRadius: 7,
+    border: `1px solid ${PALETTE.border}`,
+    fontSize: 13,
+  },
+  collectionConnectBtn: {
+    padding: "9px 14px",
+    borderRadius: 7,
+    border: "none",
+    background: PALETTE.accent,
+    color: "#fff",
+    fontSize: 13,
+    fontWeight: 700,
+    cursor: "pointer",
+  },
+  collectionChangeBtn: {
+    marginLeft: "auto",
+    padding: "6px 12px",
+    borderRadius: 7,
+    border: `1px solid ${PALETTE.border}`,
+    background: "#fff",
+    color: PALETTE.muted,
+    fontSize: 12,
+    fontWeight: 600,
+    cursor: "pointer",
+  },
 
   gameTabRow: { display: "flex", gap: 8, marginBottom: 18 },
   gameTabButton: {
     flex: 1,
     padding: "8px 10px",
     borderRadius: 999,
-    border: "1px solid #d4d4d4",
-    background: "#fff",
+    border: `1px solid ${PALETTE.border}`,
+    background: PALETTE.card,
     fontSize: 13,
     fontWeight: 600,
-    color: "#555",
+    color: PALETTE.muted,
     cursor: "pointer",
   },
-  gameTabButtonActive: { background: "#1a1a1a", color: "#fff", borderColor: "#1a1a1a" },
+  gameTabButtonActive: { background: PALETTE.accent, color: "#fff", borderColor: PALETTE.accent },
 
   comingSoon: {
-    background: "#fff",
-    border: "1px dashed #d4d4d4",
+    background: PALETTE.card,
+    border: `1px dashed ${PALETTE.border}`,
     borderRadius: 10,
     padding: 18,
   },
 
   form: {
-    background: "#fff",
-    border: "1px solid #e5e5e5",
-    borderRadius: 10,
-    padding: 20,
+    background: PALETTE.card,
+    border: `1px solid ${PALETTE.border}`,
+    borderRadius: 12,
+    padding: "24px 22px",
     display: "flex",
     flexDirection: "column",
-    gap: 12,
+    gap: 18,
   },
-  fieldRow: { display: "flex", flexDirection: "column", gap: 4 },
-  label: { fontSize: 12, fontWeight: 600, color: "#555", textTransform: "uppercase", letterSpacing: 0.4 },
+  formHeading: {
+    fontSize: 20,
+    fontWeight: 700,
+    margin: "0 0 4px",
+    color: PALETTE.primary,
+  },
+  fieldRow: { display: "flex", flexDirection: "column", gap: 6 },
+  label: { fontSize: 12, fontWeight: 600, color: PALETTE.muted, textTransform: "uppercase", letterSpacing: 0.5 },
   select: {
-    padding: "10px 12px",
-    borderRadius: 6,
-    border: "1px solid #d4d4d4",
+    padding: "11px 12px",
+    borderRadius: 7,
+    border: `1px solid ${PALETTE.border}`,
     fontSize: 14,
     background: "#fff",
+    color: PALETTE.primary,
   },
-  checkboxRow: { display: "flex", alignItems: "center", gap: 8, fontSize: 14, marginTop: 4 },
+  checkboxRow: { display: "flex", alignItems: "center", gap: 8, fontSize: 14, marginTop: 4, color: PALETTE.primary },
   chipRow: { display: "flex", flexWrap: "wrap", gap: 6 },
   chip: {
     padding: "6px 12px",
     borderRadius: 999,
-    border: "1px solid #d4d4d4",
+    border: `1px solid ${PALETTE.border}`,
     background: "#fff",
     fontSize: 12,
     fontWeight: 600,
-    color: "#555",
+    color: PALETTE.muted,
     cursor: "pointer",
   },
-  chipActive: { background: "#1a1a1a", color: "#fff", borderColor: "#1a1a1a" },
-  slider: { width: "100%", marginTop: 4 },
-  hintText: { fontSize: 12, color: "#888", marginTop: 4, lineHeight: 1.4 },
+  chipActive: { background: PALETTE.accent, color: "#fff", borderColor: PALETTE.accent },
+  slider: { width: "100%", marginTop: 4, accentColor: PALETTE.accent },
+  hintText: { fontSize: 12, color: PALETTE.mutedLight, marginTop: 4, lineHeight: 1.4 },
   button: {
     marginTop: 8,
-    padding: "12px 16px",
-    borderRadius: 6,
+    padding: "13px 16px",
+    borderRadius: 8,
     border: "none",
-    background: "#1a1a1a",
+    background: PALETTE.accent,
     color: "#fff",
     fontSize: 15,
-    fontWeight: 600,
+    fontWeight: 700,
     cursor: "pointer",
   },
   errorBox: {
     marginTop: 16,
     padding: 12,
-    borderRadius: 6,
-    background: "#fdecea",
-    color: "#8a1f11",
+    borderRadius: 8,
+    background: "#F7E6E1",
+    color: PALETTE.danger,
     fontSize: 14,
   },
+  digBox: {
+    marginTop: 16,
+    padding: "14px 14px",
+    borderRadius: 8,
+    background: PALETTE.card,
+    border: `1px solid ${PALETTE.borderStrong}`,
+    color: PALETTE.muted,
+    fontSize: 14,
+    fontWeight: 600,
+    display: "flex",
+    alignItems: "center",
+    gap: 10,
+  },
+  digSpinner: {
+    width: 15,
+    height: 15,
+    borderRadius: "50%",
+    border: `2px solid ${PALETTE.border}`,
+    borderTopColor: PALETTE.accent,
+    display: "inline-block",
+    flexShrink: 0,
+    animation: "discoverySpin 0.7s linear infinite",
+  },
+  cardDimmed: { opacity: 0.4, transition: "opacity 0.2s ease" },
+  modeButtonDisabled: { opacity: 0.5, cursor: "default" },
   emptyBox: {
     marginTop: 16,
     padding: 12,
-    borderRadius: 6,
-    background: "#fff8e1",
-    color: "#7a5c00",
+    borderRadius: 8,
+    background: "#F3E9D2",
+    color: PALETTE.warn,
     fontSize: 14,
+  },
+  modeNotice: {
+    fontSize: 12.5,
+    color: PALETTE.accentDark,
+    fontStyle: "italic",
+    margin: "10px 2px 0",
   },
   card: {
     marginTop: 20,
-    background: "#fff",
-    border: "1px solid #e5e5e5",
-    borderRadius: 10,
+    background: PALETTE.card,
+    border: `1px solid ${PALETTE.border}`,
+    borderRadius: 12,
     overflow: "hidden",
     display: "flex",
     flexDirection: "column",
+    animation: "discoveryFadeIn 0.35s ease",
   },
-  cover: { width: "100%", aspectRatio: "1 / 1", objectFit: "cover", background: "#f0f0f0" },
-  coverPlaceholder: { display: "flex", alignItems: "center", justifyContent: "center", color: "#999", fontSize: 13 },
-  cardBody: { padding: 18 },
-  cardTitle: { fontSize: 19, fontWeight: 700, margin: "0 0 10px" },
+  cover: { width: "100%", aspectRatio: "1 / 1", objectFit: "cover", background: PALETTE.border, display: "block" },
+  coverPlaceholder: { display: "flex", alignItems: "center", justifyContent: "center", color: PALETTE.mutedLight, fontSize: 13 },
+  coverLink: { display: "block", cursor: "pointer" },
+  cardBody: { padding: "20px 20px 18px" },
+  cardTitle: { fontSize: 21, fontWeight: 800, margin: "0 0 2px", letterSpacing: -0.2 },
+  titleLink: { color: "inherit", textDecoration: "none" },
+  cardArtist: { fontSize: 15, fontWeight: 600, color: PALETTE.accentDark, margin: "0 0 6px" },
+  artistLink: { color: "inherit", textDecoration: "none" },
+  cardSubline: { fontSize: 13, color: PALETTE.muted, margin: "0 0 12px" },
   metaRow: { display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 10 },
+  genreTag: {
+    fontSize: 12,
+    fontWeight: 700,
+    background: PALETTE.accent,
+    padding: "4px 10px",
+    borderRadius: 999,
+    color: "#fff",
+  },
   tag: {
     fontSize: 12,
-    background: "#f0f0f0",
+    background: PALETTE.bg,
+    border: `1px solid ${PALETTE.border}`,
     padding: "4px 8px",
     borderRadius: 999,
-    color: "#444",
+    color: PALETTE.muted,
   },
-  metaLine: { fontSize: 13, color: "#444", margin: "4px 0" },
-  link: { display: "inline-block", marginTop: 10, fontSize: 14, color: "#1a1a1a", fontWeight: 600, textDecoration: "underline" },
+  styleChipRow: { display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 10 },
+  styleChip: {
+    fontSize: 12,
+    fontWeight: 600,
+    background: "#fff",
+    border: `1px solid ${PALETTE.border}`,
+    padding: "5px 10px",
+    borderRadius: 999,
+    color: PALETTE.primary,
+    cursor: "pointer",
+  },
+  stars: { color: PALETTE.accent, fontSize: 14, letterSpacing: 1 },
+  metaLine: { fontSize: 13, color: PALETTE.primary, margin: "6px 0" },
+  link: { display: "inline-block", marginTop: 10, fontSize: 14, color: PALETTE.accentDark, fontWeight: 700, textDecoration: "underline" },
   historySection: { marginTop: 24 },
+  discoveryModeRow: { display: "flex", gap: 8, marginTop: 16, flexWrap: "wrap" },
+  modeButton: {
+    flex: 1,
+    minWidth: 110,
+    padding: "10px 10px",
+    borderRadius: 8,
+    border: `1px solid ${PALETTE.border}`,
+    background: "#fff",
+    color: PALETTE.primary,
+    fontSize: 12.5,
+    fontWeight: 700,
+    cursor: "pointer",
+  },
   backToFiltersButton: {
     display: "block",
     width: "100%",
     marginTop: 12,
     padding: "10px 14px",
-    borderRadius: 6,
-    border: "1px solid #d4d4d4",
+    borderRadius: 8,
+    border: `1px solid ${PALETTE.border}`,
     background: "#fff",
-    color: "#555",
+    color: PALETTE.muted,
     fontSize: 13,
     fontWeight: 600,
     cursor: "pointer",
   },
-  historyTitle: { fontSize: 13, fontWeight: 600, color: "#666", marginBottom: 8 },
+  historyTitle: { fontSize: 13, fontWeight: 700, color: PALETTE.muted, marginBottom: 8 },
   historyRow: { display: "flex", gap: 10, overflowX: "auto" },
-  historyItem: { display: "flex", flexDirection: "column", alignItems: "center", width: 64 },
-  historyThumb: { width: 56, height: 56, objectFit: "cover", borderRadius: 6 },
-  historyLabel: { fontSize: 10, color: "#777", marginTop: 4, textAlign: "center", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", width: "100%" },
+  historyItem: { display: "flex", flexDirection: "column", alignItems: "center", width: 64, textDecoration: "none", cursor: "pointer" },
+  historyThumb: { width: 56, height: 56, objectFit: "cover", borderRadius: 8 },
+  historyLabel: { fontSize: 10, color: PALETTE.mutedLight, marginTop: 4, textAlign: "center", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", width: "100%" },
 
   statToggleRow: { display: "flex", gap: 6, marginBottom: 14, flexWrap: "wrap" },
   statToggleButton: {
     padding: "6px 12px",
     borderRadius: 999,
-    border: "1px solid #d4d4d4",
+    border: `1px solid ${PALETTE.border}`,
     background: "#fff",
     fontSize: 12,
     fontWeight: 600,
-    color: "#555",
+    color: PALETTE.muted,
     cursor: "pointer",
   },
-  statToggleButtonActive: { background: "#1a1a1a", color: "#fff", borderColor: "#1a1a1a" },
+  statToggleButtonActive: { background: PALETTE.accent, color: "#fff", borderColor: PALETTE.accent },
 
-  scoreRow: { display: "flex", gap: 16, fontSize: 13, color: "#555", marginBottom: 14 },
+  scoreRow: { display: "flex", gap: 16, fontSize: 13, color: PALETTE.muted, marginBottom: 14 },
 
   duelRow: { display: "flex", alignItems: "stretch", gap: 8 },
   vsCol: { display: "flex", alignItems: "center", justifyContent: "center", width: 28 },
-  vsText: { fontSize: 12, fontWeight: 700, color: "#999" },
+  vsText: { fontSize: 12, fontWeight: 700, color: PALETTE.mutedLight },
 
   gameCard: {
     flex: 1,
-    background: "#fff",
-    border: "1px solid #e5e5e5",
+    background: PALETTE.card,
+    border: `1px solid ${PALETTE.border}`,
     borderRadius: 10,
     overflow: "hidden",
     display: "flex",
@@ -1204,35 +2038,35 @@ const styles = {
     fontWeight: 700,
     letterSpacing: 0.5,
     textTransform: "uppercase",
-    color: "#666",
-    background: "#f0f0f0",
+    color: PALETTE.muted,
+    background: PALETTE.bg,
   },
-  gameCover: { width: "100%", height: 180, objectFit: "cover", background: "#f0f0f0" },
+  gameCover: { width: "100%", height: 180, objectFit: "cover", background: PALETTE.border },
   gameCardBody: { padding: 12 },
   gameCardTitle: { fontSize: 13, fontWeight: 700, margin: "0 0 6px", minHeight: 34, overflow: "hidden" },
-  gameCardStat: { fontSize: 14, fontWeight: 700, margin: 0, color: "#1a1a1a" },
+  gameCardStat: { fontSize: 14, fontWeight: 700, margin: 0, color: PALETTE.primary },
   resultBanner: { fontSize: 12, fontWeight: 700, margin: "8px 0 0" },
 
   guessRow: { display: "flex", gap: 10, marginTop: 14 },
   guessButton: {
     flex: 1,
     padding: "12px 10px",
-    borderRadius: 6,
+    borderRadius: 8,
     border: "none",
-    background: "#1a1a1a",
+    background: PALETTE.accent,
     color: "#fff",
     fontSize: 13,
-    fontWeight: 600,
+    fontWeight: 700,
     cursor: "pointer",
   },
 
   genreCard: {
-    background: "#fff",
-    border: "1px solid #e5e5e5",
-    borderRadius: 10,
+    background: PALETTE.card,
+    border: `1px solid ${PALETTE.border}`,
+    borderRadius: 12,
     overflow: "hidden",
   },
-  genreCover: { width: "100%", aspectRatio: "1 / 1", objectFit: "cover", background: "#f0f0f0", display: "block" },
+  genreCover: { width: "100%", aspectRatio: "1 / 1", objectFit: "cover", background: PALETTE.border, display: "block" },
   coverWrap: { position: "relative" },
   imageArrow: {
     position: "absolute",
@@ -1269,12 +2103,12 @@ const styles = {
   },
   genreButton: {
     padding: "12px 6px",
-    borderRadius: 6,
-    border: "1px solid #d4d4d4",
-    background: "#fafafa",
+    borderRadius: 8,
+    border: `1px solid ${PALETTE.border}`,
+    background: PALETTE.bg,
     fontSize: 12.5,
     fontWeight: 600,
-    color: "#333",
+    color: PALETTE.primary,
     cursor: "pointer",
     lineHeight: 1.3,
   },
@@ -1286,27 +2120,27 @@ const styles = {
     flex: 1,
     minWidth: 140,
     padding: "10px 12px",
-    borderRadius: 6,
-    border: "1px solid #d4d4d4",
+    borderRadius: 7,
+    border: `1px solid ${PALETTE.border}`,
     fontSize: 14,
     background: "#fff",
   },
   bonusButton: {
     padding: "10px 14px",
-    borderRadius: 6,
+    borderRadius: 7,
     border: "none",
-    background: "#1a1a1a",
+    background: PALETTE.accent,
     color: "#fff",
     fontSize: 13,
-    fontWeight: 600,
+    fontWeight: 700,
     cursor: "pointer",
   },
   bonusSkip: {
     padding: "10px 14px",
-    borderRadius: 6,
-    border: "1px solid #d4d4d4",
+    borderRadius: 7,
+    border: `1px solid ${PALETTE.border}`,
     background: "#fff",
-    color: "#666",
+    color: PALETTE.muted,
     fontSize: 13,
     fontWeight: 600,
     cursor: "pointer",
