@@ -379,6 +379,100 @@ async function randomReleaseSearch(baseParams, excluded, signal) {
   return shuffle(items)[0];
 }
 
+// ============================== COLLECTION MODE ==============================
+// Discogs' collection endpoint doesn't accept genre/style/decade/format filters — it just
+// returns pages of everything in a folder. So instead of one search per draw (like the
+// global-catalog flow above), we page through the whole collection once per username, cache
+// it, and filter/sample client-side against that cached list from then on.
+
+const COLLECTION_PER_PAGE = 100;
+
+async function fetchFullCollection(username, signal, onProgress) {
+  let page = 1;
+  let pages = 1;
+  const items = [];
+  do {
+    const data = await apiFetch(
+      { kind: "collection", username, page: String(page), per_page: String(COLLECTION_PER_PAGE) },
+      signal
+    );
+    pages = data?.pagination?.pages || 1;
+    items.push(...(data?.releases || []));
+    onProgress?.(items.length, data?.pagination?.items || items.length);
+    page++;
+  } while (page <= pages);
+  return items;
+}
+
+// Reshapes a Discogs collection entry into the same rough shape as a /database/search
+// result, so the rest of the app (rendering, detail lookups, exclusion tracking) doesn't
+// need to know whether a pick came from the global catalog or a personal collection.
+function collectionItemToPick(item) {
+  const info = item.basic_information || {};
+  const artistNames = (info.artists || []).map((a) => a.name).filter(Boolean).join(", ");
+  return {
+    id: info.id,
+    master_id: info.master_id || null,
+    resource_url: info.resource_url,
+    title: artistNames ? `${artistNames} - ${info.title}` : info.title,
+    year: info.year || null,
+    country: null, // not exposed by the collection endpoint
+    genre: info.genres || [],
+    style: info.styles || [],
+    format: (info.formats || []).flatMap((f) => [f.name, ...(f.descriptions || [])]).filter(Boolean),
+    cover_image: info.cover_image || info.thumb || null,
+    thumb: info.thumb || null,
+    uri: info.id ? `/release/${info.id}` : null,
+    label: (info.labels || []).map((l) => l.name),
+  };
+}
+
+function collectionPickMatchesFilters(pick, filters) {
+  const { genre, style, decade, formats } = filters;
+  if (genre && genre !== "Any Genre" && !(pick.genre || []).includes(genre)) return false;
+  if (style && !(pick.style || []).includes(style)) return false;
+  if (decade && decade !== "Any Decade") {
+    const start = parseInt(decade.slice(0, 4), 10);
+    const y = Number(pick.year);
+    if (!y || y < start || y >= start + 10) return false;
+  }
+  if (formats && formats.length > 0) {
+    const matches = formats.some((f) => (pick.format || []).some((pf) => pf.toLowerCase().includes(f.toLowerCase())));
+    if (!matches) return false;
+  }
+  return true;
+}
+
+// Collection-scoped counterpart to randomReleaseSearch. Since the whole collection is
+// already in memory, this filters + shuffles once instead of retrying network calls; when a
+// detail check is needed (rating, artwork, custom extraCheck) it walks the shuffled
+// candidates until one clears it or the candidate pool runs out.
+async function randomFromCollection(items, filters, excluded, needsDetail, extraCheck, signal) {
+  const excludedIds = toIdSet(excluded);
+  const candidates = shuffle(
+    (items || [])
+      .map(collectionItemToPick)
+      .filter((p) => p.id && !excludedIds.has(p.id) && !(p.master_id && excludedIds.has(p.master_id)))
+      .filter((p) => collectionPickMatchesFilters(p, filters))
+  );
+  if (candidates.length === 0) return { found: null, foundDetail: null, anyResultsAtAll: false };
+  if (!needsDetail) return { found: candidates[0], foundDetail: null, anyResultsAtAll: true };
+
+  const maxCheck = Math.min(candidates.length, 15);
+  for (let i = 0; i < maxCheck; i++) {
+    const pick = candidates[i];
+    try {
+      const full = await discogsFetchDetail(pick.resource_url, signal);
+      if (extraCheck && !extraCheck(full, pick)) continue;
+      return { found: pick, foundDetail: full, anyResultsAtAll: true };
+    } catch (e) {
+      if (e.name === "AbortError") throw e;
+      continue;
+    }
+  }
+  return { found: null, foundDetail: null, anyResultsAtAll: true };
+}
+
 function Turntable({ size = 64 }) {
   return (
     <div style={{ width: size, height: size, flexShrink: 0 }}>
@@ -412,6 +506,10 @@ function Turntable({ size = 64 }) {
 
 export default function App() {
   const [tab, setTab] = useState("discover"); // 'discover' | 'games'
+  const [collectionSource, setCollectionSource] = useState(null); // { username } | null
+  const [collectionItems, setCollectionItems] = useState(null); // cached array, or null if not connected
+  const [collectionLoading, setCollectionLoading] = useState(false);
+  const [collectionError, setCollectionError] = useState("");
 
   return (
     <div style={styles.page}>
@@ -512,15 +610,101 @@ export default function App() {
           </button>
         </div>
 
-        {tab === "discover" ? <DiscoverTab /> : <GamesTab />}
+        <CollectionBar
+          collectionSource={collectionSource}
+          setCollectionSource={setCollectionSource}
+          collectionItems={collectionItems}
+          setCollectionItems={setCollectionItems}
+          loading={collectionLoading}
+          setLoading={setCollectionLoading}
+          error={collectionError}
+          setError={setCollectionError}
+        />
+
+        {tab === "discover" ? (
+          <DiscoverTab collectionSource={collectionSource} collectionItems={collectionItems} />
+        ) : (
+          <GamesTab collectionSource={collectionSource} collectionItems={collectionItems} />
+        )}
       </div>
+    </div>
+  );
+}
+
+// ============================== COLLECTION BAR ==============================
+// Always-visible strip between the tabs and whichever tab is active. Connecting here scopes
+// both Discover and Games to the connected collection — it isn't a separate destination.
+
+function CollectionBar({ collectionSource, setCollectionSource, collectionItems, setCollectionItems, loading, setLoading, error, setError }) {
+  const [draftUsername, setDraftUsername] = useState("");
+  const requestRef = useRef(null);
+
+  async function connect(username) {
+    requestRef.current?.abort();
+    const controller = new AbortController();
+    requestRef.current = controller;
+    setError("");
+    setLoading(true);
+    setCollectionItems(null);
+    try {
+      const items = await fetchFullCollection(username, controller.signal);
+      if (controller.signal.aborted) return;
+      if (items.length === 0) {
+        setError("That collection came back empty — double check the username, or that the collection isn't empty.");
+        setLoading(false);
+        return;
+      }
+      setCollectionSource({ username });
+      setCollectionItems(items);
+      setLoading(false);
+    } catch (e) {
+      if (e.name === "AbortError") return;
+      setError(e.message || "Couldn't load that collection.");
+      setLoading(false);
+    }
+  }
+
+  function disconnect() {
+    requestRef.current?.abort();
+    setCollectionSource(null);
+    setCollectionItems(null);
+    setError("");
+  }
+
+  if (collectionSource) {
+    return (
+      <div style={styles.collectionBar}>
+        <span>🔒 Playing from <strong>{collectionSource.username}</strong>'s collection ({collectionItems?.length ?? 0} releases)</span>
+        <button style={styles.collectionChangeBtn} onClick={disconnect}>Change</button>
+      </div>
+    );
+  }
+
+  return (
+    <div style={styles.collectionBar}>
+      <input
+        style={styles.collectionInput}
+        placeholder="Discogs username"
+        value={draftUsername}
+        onChange={(e) => setDraftUsername(e.target.value)}
+        onKeyDown={(e) => e.key === "Enter" && draftUsername.trim() && connect(draftUsername.trim())}
+        disabled={loading}
+      />
+      <button
+        style={styles.collectionConnectBtn}
+        onClick={() => draftUsername.trim() && connect(draftUsername.trim())}
+        disabled={loading || !draftUsername.trim()}
+      >
+        {loading ? "Loading…" : "Connect"}
+      </button>
+      {error && <p style={{ ...styles.hintText, color: PALETTE.danger, width: "100%" }}>{error}</p>}
     </div>
   );
 }
 
 // ============================== DISCOVER TAB ==============================
 
-function DiscoverTab() {
+function DiscoverTab({ collectionSource, collectionItems }) {
   const [genre, setGenre] = useState("Any Genre");
   const [style, setStyle] = useState("");
   const [decade, setDecade] = useState("Any Decade");
@@ -616,64 +800,96 @@ function DiscoverTab() {
       const needsRatingCheck = minRating > 0;
       const needsDetailForSelection = needsRatingCheck || onlyArtwork || !!extraCheck;
       const maxAttempts = 10;
+      const inCollectionMode = !!(collectionItems && collectionItems.length);
 
       let found = null;
       let foundDetail = null;
       let anyResultsAtAll = false;
 
-      for (let i = 0; i < maxAttempts; i++) {
-        if (i > 0) await sleep(150);
-        const yearForAttempt = randomYearInDecade(decadeOverride || decade);
-        const baseParams = buildParams(yearForAttempt);
-        if (genreOverride) baseParams.genre = genreOverride;
-        if (styleOverride !== undefined) {
-          if (styleOverride) baseParams.style = styleOverride;
-          else delete baseParams.style;
-        }
-
-        let pick;
-        try {
-          pick = await randomReleaseSearch(baseParams, seenIdsRef.current, controller.signal);
-        } catch (e) {
-          if (e.name === "AbortError") return;
-          if (String(e?.message || "").includes("rate-limiting")) await sleep(1200);
-          continue; // transient hiccup on the search itself — retry rather than failing outright
-        }
-        if (!pick) break; // Discogs genuinely has zero matches for these filters
-        anyResultsAtAll = true;
-
-        if (needsClientFormatCheck) {
-          const pickFormats = pick.format || [];
-          const matches = formats.some((f) => pickFormats.includes(f));
-          if (!matches) continue;
-        }
-
-        if (needsDetailForSelection) {
-          try {
-            const full = await discogsFetchDetail(pick.resource_url, controller.signal);
+      if (inCollectionMode) {
+        // Collection mode: filter the cached collection client-side rather than hitting search.
+        const filters = {
+          genre: genreOverride || genre,
+          style: styleOverride !== undefined ? styleOverride : style,
+          decade: decadeOverride || decade,
+          formats,
+        };
+        const outcome = await randomFromCollection(
+          collectionItems,
+          filters,
+          seenIdsRef.current,
+          needsDetailForSelection,
+          (full, pick) => {
+            if (onlyArtwork && !full.images?.some((image) => image.uri || image.uri150)) return false;
             const rating = full.community?.rating;
-            if (onlyArtwork && !full.images?.some((image) => image.uri || image.uri150)) continue;
-            if (needsRatingCheck && (!rating || rating.count === 0 || rating.average < minRating)) continue;
-            if (extraCheck && !extraCheck(full, pick)) continue;
-            found = pick;
-            foundDetail = full;
-            break;
+            if (needsRatingCheck && (!rating || rating.count === 0 || rating.average < minRating)) return false;
+            if (extraCheck && !extraCheck(full, pick)) return false;
+            return true;
+          },
+          controller.signal
+        );
+        found = outcome.found;
+        foundDetail = outcome.foundDetail;
+        anyResultsAtAll = outcome.anyResultsAtAll;
+      } else {
+        for (let i = 0; i < maxAttempts; i++) {
+          if (i > 0) await sleep(150);
+          const yearForAttempt = randomYearInDecade(decadeOverride || decade);
+          const baseParams = buildParams(yearForAttempt);
+          if (genreOverride) baseParams.genre = genreOverride;
+          if (styleOverride !== undefined) {
+            if (styleOverride) baseParams.style = styleOverride;
+            else delete baseParams.style;
+          }
+
+          let pick;
+          try {
+            pick = await randomReleaseSearch(baseParams, seenIdsRef.current, controller.signal);
           } catch (e) {
             if (e.name === "AbortError") return;
-            continue;
+            if (String(e?.message || "").includes("rate-limiting")) await sleep(1200);
+            continue; // transient hiccup on the search itself — retry rather than failing outright
           }
-        } else {
-          found = pick;
-          break;
+          if (!pick) break; // Discogs genuinely has zero matches for these filters
+          anyResultsAtAll = true;
+
+          if (needsClientFormatCheck) {
+            const pickFormats = pick.format || [];
+            const matches = formats.some((f) => pickFormats.includes(f));
+            if (!matches) continue;
+          }
+
+          if (needsDetailForSelection) {
+            try {
+              const full = await discogsFetchDetail(pick.resource_url, controller.signal);
+              const rating = full.community?.rating;
+              if (onlyArtwork && !full.images?.some((image) => image.uri || image.uri150)) continue;
+              if (needsRatingCheck && (!rating || rating.count === 0 || rating.average < minRating)) continue;
+              if (extraCheck && !extraCheck(full, pick)) continue;
+              found = pick;
+              foundDetail = full;
+              break;
+            } catch (e) {
+              if (e.name === "AbortError") return;
+              continue;
+            }
+          } else {
+            found = pick;
+            break;
+          }
         }
       }
 
       if (controller.signal.aborted) return;
       if (!found) {
         setEmptyNotice(
-          anyResultsAtAll
-            ? "Found matches, but couldn't find one that also cleared the extra filters after several tries. Try loosening things a bit."
-            : "Nothing matched that combination. Try loosening a filter — style and country are the most restrictive."
+          inCollectionMode
+            ? (anyResultsAtAll
+                ? "Found matches in the collection, but none cleared the extra filters. Try loosening things a bit."
+                : "Nothing in this collection matched that combination. Try loosening a filter.")
+            : (anyResultsAtAll
+                ? "Found matches, but couldn't find one that also cleared the extra filters after several tries. Try loosening things a bit."
+                : "Nothing matched that combination. Try loosening a filter — style and country are the most restrictive.")
         );
         setLoading(false);
         return null;
@@ -788,7 +1004,7 @@ function DiscoverTab() {
   return (
     <>
       <div style={styles.form} ref={formRef}>
-        <p style={styles.formHeading}>Find me…</p>
+        <p style={styles.formHeading}>{collectionSource ? `Find me… (from ${collectionSource.username}'s collection)` : "Find me…"}</p>
 
         <div style={styles.fieldRow}>
           <label style={styles.label}>Genre</label>
@@ -834,11 +1050,14 @@ function DiscoverTab() {
 
         <div style={styles.fieldRow}>
           <label style={styles.label}>Country</label>
-          <select style={styles.select} value={country} onChange={(e) => setCountry(e.target.value)}>
+          <select style={styles.select} value={country} onChange={(e) => setCountry(e.target.value)} disabled={!!collectionSource}>
             {COUNTRIES.map((c) => (
               <option key={c} value={c}>{c}</option>
             ))}
           </select>
+          {collectionSource && (
+            <p style={styles.hintText}>Discogs doesn't expose pressing country on collection data, so this filter is off while a collection is connected.</p>
+          )}
         </div>
 
         <div style={styles.fieldRow}>
@@ -1092,11 +1311,14 @@ function DiscoverTab() {
 
 // ============================== GAMES TAB ==============================
 
-function GamesTab() {
+function GamesTab({ collectionSource, collectionItems }) {
   const [game, setGame] = useState("genre"); // 'higherlower' | 'genre'
 
   return (
     <>
+      {collectionSource && (
+        <p style={styles.modeNotice}>Playing within {collectionSource.username}'s collection.</p>
+      )}
       <div style={styles.gameTabRow}>
         <button
           style={{ ...styles.gameTabButton, ...(game === "genre" ? styles.gameTabButtonActive : {}) }}
@@ -1112,7 +1334,11 @@ function GamesTab() {
         </button>
       </div>
 
-      {game === "higherlower" ? <HigherLowerGame /> : <GuessGenreGame />}
+      {game === "higherlower" ? (
+        <HigherLowerGame collectionItems={collectionItems} />
+      ) : (
+        <GuessGenreGame collectionItems={collectionItems} />
+      )}
     </>
   );
 }
@@ -1147,10 +1373,31 @@ function randomGameYear() {
   return 1955 + Math.floor(Math.random() * 69);
 }
 
-async function drawValidRelease(statKey, excludeId, attempts) {
+async function drawValidRelease(statKey, excludeId, collectionItems, attempts) {
+  const excluded = toIdSet(excludeId);
+
+  if (collectionItems && collectionItems.length) {
+    const maxCollectionAttempts = attempts ?? 20;
+    const candidates = shuffle(
+      collectionItems
+        .map(collectionItemToPick)
+        .filter((p) => p.id && !excluded.has(p.id) && !(p.master_id && excluded.has(p.master_id)))
+    );
+    for (let i = 0; i < Math.min(candidates.length, maxCollectionAttempts); i++) {
+      const pick = candidates[i];
+      try {
+        const detail = await discogsFetchDetail(pick.resource_url);
+        const value = getStatValue(detail, statKey);
+        if (value != null) return { pick, detail, value };
+      } catch {
+        continue;
+      }
+    }
+    return null;
+  }
+
   // Plenty of obscure vinyl has no active listings, so price needs more swings to land one.
   const maxAttempts = attempts ?? (statKey === "price" ? 8 : 6);
-  const excluded = toIdSet(excludeId);
 
   for (let i = 0; i < maxAttempts; i++) {
     if (i > 0) await sleep(150); // small gap between attempts eases pressure on the rate limit
@@ -1179,7 +1426,7 @@ async function drawValidRelease(statKey, excludeId, attempts) {
   return null;
 }
 
-function HigherLowerGame() {
+function HigherLowerGame({ collectionItems }) {
   const [statKey, setStatKey] = useState("have");
   const [champion, setChampion] = useState(null); // { pick, detail, value }
   const [challenger, setChallenger] = useState(null);
@@ -1205,10 +1452,10 @@ function HigherLowerGame() {
     setChampion(null);
     setChallenger(null);
     try {
-      const first = await drawValidRelease(key, null);
+      const first = await drawValidRelease(key, null, collectionItems);
       if (runIdRef.current !== runId) return; // a newer round took over
       if (!first) throw new Error("Couldn't find a release... Try waiting a second or just refreshing. Discogs is probably on a bathroom break.");
-      const second = await drawValidRelease(key, first.pick.id);
+      const second = await drawValidRelease(key, first.pick.id, collectionItems);
       if (runIdRef.current !== runId) return;
       if (!second) throw new Error("Couldn't find a second release with that stat available so try refreshing. Discogs likes to throw fits like this.");
       setChampion(first);
@@ -1219,12 +1466,12 @@ function HigherLowerGame() {
     } finally {
       if (runIdRef.current === runId) setLoading(false);
     }
-  }, []);
+  }, [collectionItems]);
 
   useEffect(() => {
     startNewRound(statKey);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [statKey]);
+  }, [statKey, collectionItems]);
 
   async function guess(direction) {
     if (!champion || !challenger || revealed) return;
@@ -1244,7 +1491,7 @@ function HigherLowerGame() {
       if (correct) {
         setLoading(true);
         try {
-          const next = await drawValidRelease(statKey, challenger.pick.id);
+          const next = await drawValidRelease(statKey, challenger.pick.id, collectionItems);
           if (!next) throw new Error("Couldn't find a fresh challenger. Try again. If you have no options to do anything, just refresh. Discogs is likely taking a break.");
           setChampion(challenger);
           setChallenger(next);
@@ -1394,10 +1641,33 @@ function buildStyleOptions(round) {
   return shuffle([...actual, ...pool.slice(0, decoyCount)]);
 }
 
-async function drawGenreRound(excludeId, attempts = 6) {
+async function drawGenreRound(excludeId, collectionItems, attempts) {
   const excluded = toIdSet(excludeId);
 
-  for (let i = 0; i < attempts; i++) {
+  if (collectionItems && collectionItems.length) {
+    const maxCollectionAttempts = attempts ?? 20;
+    const candidates = shuffle(
+      collectionItems
+        .map(collectionItemToPick)
+        .filter((p) => p.id && !excluded.has(p.id) && !(p.master_id && excluded.has(p.master_id)))
+        .filter((p) => (p.genre || []).some((g) => GAME_GENRES.includes(g)))
+    );
+    for (let i = 0; i < Math.min(candidates.length, maxCollectionAttempts); i++) {
+      const pick = candidates[i];
+      let detail = null;
+      try {
+        detail = await discogsFetchDetail(pick.resource_url);
+      } catch {
+        continue;
+      }
+      if (!detail?.images?.length && !pick.cover_image) continue;
+      return { pick, detail };
+    }
+    return null;
+  }
+
+  const maxAttempts = attempts ?? 6;
+  for (let i = 0; i < maxAttempts; i++) {
     if (i > 0) await sleep(150);
     try {
       // Same fix as Higher/Lower: search within a randomly chosen genre each attempt so the
@@ -1428,7 +1698,7 @@ async function drawGenreRound(excludeId, attempts = 6) {
   return null;
 }
 
-function GuessGenreGame() {
+function GuessGenreGame({ collectionItems }) {
   const [round, setRound] = useState(null); // { pick, detail }
   const [phase, setPhase] = useState("guessing"); // 'guessing' | 'revealed'
   const [guessedGenre, setGuessedGenre] = useState(null);
@@ -1453,7 +1723,7 @@ function GuessGenreGame() {
     setBonusStatus(null);
     setImageIndex(0);
     try {
-      const next = await drawGenreRound(excludeId);
+      const next = await drawGenreRound(excludeId, collectionItems);
       if (runIdRef.current !== runId) return; // a newer round took over
       if (!next) throw new Error("Couldn't pull a fresh release right now. Try again in a moment. Most likely Discogs is just being lazy.");
       setRound(next);
@@ -1463,12 +1733,12 @@ function GuessGenreGame() {
     } finally {
       if (runIdRef.current === runId) setLoading(false);
     }
-  }, []);
+  }, [collectionItems]);
 
   useEffect(() => {
     startRound(null);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [collectionItems]);
 
   function submitGenreGuess(g) {
     if (phase !== "guessing" || !round) return;
@@ -1632,6 +1902,49 @@ const styles = {
     cursor: "pointer",
   },
   tabButtonActive: { color: PALETTE.primary, borderBottomColor: PALETTE.accent },
+
+  collectionBar: {
+    display: "flex",
+    alignItems: "center",
+    gap: 8,
+    flexWrap: "wrap",
+    padding: "12px 14px",
+    marginBottom: 18,
+    borderRadius: 10,
+    border: `1px solid ${PALETTE.border}`,
+    background: PALETTE.card,
+    fontSize: 13,
+    color: PALETTE.primary,
+  },
+  collectionInput: {
+    flex: 1,
+    minWidth: 140,
+    padding: "9px 10px",
+    borderRadius: 7,
+    border: `1px solid ${PALETTE.border}`,
+    fontSize: 13,
+  },
+  collectionConnectBtn: {
+    padding: "9px 14px",
+    borderRadius: 7,
+    border: "none",
+    background: PALETTE.accent,
+    color: "#fff",
+    fontSize: 13,
+    fontWeight: 700,
+    cursor: "pointer",
+  },
+  collectionChangeBtn: {
+    marginLeft: "auto",
+    padding: "6px 12px",
+    borderRadius: 7,
+    border: `1px solid ${PALETTE.border}`,
+    background: "#fff",
+    color: PALETTE.muted,
+    fontSize: 12,
+    fontWeight: 600,
+    cursor: "pointer",
+  },
 
   gameTabRow: { display: "flex", gap: 8, marginBottom: 18 },
   gameTabButton: {
