@@ -181,6 +181,22 @@ const PALETTE = {
 // Discogs' image CDN occasionally 404s on an otherwise valid URL. Rather than giving up
 // immediately, retry the same URL once (with a cache-busting param) before falling back to
 // a placeholder — smooths over what's usually just a transient hiccup.
+// Mimics CSS object-fit: cover for a manual canvas draw — returns the rectangle to crop
+// out of the source image so that scaling it to dstW×dstH fills the box without distorting
+// the aspect ratio (crops the overflow instead of stretching it).
+function coverCropRect(srcW, srcH, dstW, dstH) {
+  const srcAspect = srcW / srcH;
+  const dstAspect = dstW / dstH;
+  if (srcAspect > dstAspect) {
+    const sh = srcH;
+    const sw = srcH * dstAspect;
+    return { sx: (srcW - sw) / 2, sy: 0, sw, sh };
+  }
+  const sw = srcW;
+  const sh = srcW / dstAspect;
+  return { sx: 0, sy: (srcH - sh) / 2, sw, sh };
+}
+
 function SmartImage({ src, alt, style, placeholderStyle, placeholderText = "No image" }) {
   const [attempt, setAttempt] = useState(0);
   const [failed, setFailed] = useState(false);
@@ -210,9 +226,14 @@ function SmartImage({ src, alt, style, placeholderStyle, placeholderText = "No i
       const H = (canvas.height = box.clientHeight || 400);
       const ctx = canvas.getContext("2d");
 
-      // Coarse -> fine block sizes. Each step draws the source into a tiny offscreen
-      // canvas, then blows it up with smoothing off — that upscale is what produces
-      // the blocky look. Last step is a normal full-res draw.
+      // Crop the source down to the container's aspect ratio first — same idea as CSS
+      // object-fit: cover — so a non-square box (like the Higher/Lower game cards) crops
+      // instead of squishing the image to fit.
+      const { sx, sy, sw, sh } = coverCropRect(img.naturalWidth || W, img.naturalHeight || H, W, H);
+
+      // Coarse -> fine block sizes. Each step draws the (already-cropped) source into a
+      // tiny offscreen canvas, then blows it up with smoothing off — that upscale is what
+      // produces the blocky look. Last step is a normal full-res draw.
       const steps = [28, 14, 7, 3, 1];
       let i = 0;
 
@@ -222,7 +243,7 @@ function SmartImage({ src, alt, style, placeholderStyle, placeholderText = "No i
         if (block === 1) {
           ctx.imageSmoothingEnabled = true;
           ctx.clearRect(0, 0, W, H);
-          ctx.drawImage(img, 0, 0, W, H);
+          ctx.drawImage(img, sx, sy, sw, sh, 0, 0, W, H);
           setRevealed(true);
           return;
         }
@@ -231,7 +252,7 @@ function SmartImage({ src, alt, style, placeholderStyle, placeholderText = "No i
         const tiny = document.createElement("canvas");
         tiny.width = w;
         tiny.height = h;
-        tiny.getContext("2d").drawImage(img, 0, 0, w, h);
+        tiny.getContext("2d").drawImage(img, sx, sy, sw, sh, 0, 0, w, h);
 
         ctx.imageSmoothingEnabled = false;
         ctx.clearRect(0, 0, W, H);
