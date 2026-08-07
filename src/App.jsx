@@ -161,16 +161,16 @@ const COUNTRIES = [
 // more than one, we broaden the query and filter candidates client-side instead.
 const FORMAT_OPTIONS = ["Vinyl", "LP", "CD", "Cassette", "7\"", "10\"", "12\"", "Box Set"];
 
-// Warm-neutral palette — leans toward "flipping through record bins" rather than a
+// Warm-earthy palette — leans toward "flipping through record bins" rather than a
 // generic utilitarian gray/white/black app.
 const PALETTE = {
-  bg: "#F5F3EE",
+  bg: "#F4EDE1",
   card: "#FFFFFF",
-  border: "#DDD8CE",
-  borderStrong: "#C9C2B2",
-  primary: "#222222",
-  muted: "#75705F",
-  mutedLight: "#948E7C",
+  border: "#E3D9C6",
+  borderStrong: "#D0C2A8",
+  primary: "#2E2A22",
+  muted: "#7C7259",
+  mutedLight: "#948B72",
   accent: "#598396",
   accentDark: "#2754a8",
   success: "#4E8B5D",
@@ -184,33 +184,88 @@ const PALETTE = {
 function SmartImage({ src, alt, style, placeholderStyle, placeholderText = "No image" }) {
   const [attempt, setAttempt] = useState(0);
   const [failed, setFailed] = useState(false);
+  const [revealed, setRevealed] = useState(false);
+  const canvasRef = useRef(null);
+  const containerRef = useRef(null);
 
   useEffect(() => {
     setAttempt(0);
     setFailed(false);
+    setRevealed(false);
   }, [src]);
+
+  useEffect(() => {
+    if (!src || failed) return;
+    let cancelled = false;
+    const effectiveSrc = attempt === 0 ? src : src + (src.includes("?") ? "&" : "?") + "retry=" + attempt;
+    const img = new Image();
+
+    img.onload = () => {
+      if (cancelled) return;
+      const canvas = canvasRef.current;
+      const box = containerRef.current;
+      if (!canvas || !box) return;
+
+      const W = (canvas.width = box.clientWidth || 400);
+      const H = (canvas.height = box.clientHeight || 400);
+      const ctx = canvas.getContext("2d");
+
+      // Coarse -> fine block sizes. Each step draws the source into a tiny offscreen
+      // canvas, then blows it up with smoothing off — that upscale is what produces
+      // the blocky look. Last step is a normal full-res draw.
+      const steps = [28, 14, 7, 3, 1];
+      let i = 0;
+
+      function drawStep() {
+        if (cancelled) return;
+        const block = steps[i];
+        if (block === 1) {
+          ctx.imageSmoothingEnabled = true;
+          ctx.clearRect(0, 0, W, H);
+          ctx.drawImage(img, 0, 0, W, H);
+          setRevealed(true);
+          return;
+        }
+        const w = Math.max(1, Math.round(W / block));
+        const h = Math.max(1, Math.round(H / block));
+        const tiny = document.createElement("canvas");
+        tiny.width = w;
+        tiny.height = h;
+        tiny.getContext("2d").drawImage(img, 0, 0, w, h);
+
+        ctx.imageSmoothingEnabled = false;
+        ctx.clearRect(0, 0, W, H);
+        ctx.drawImage(tiny, 0, 0, w, h, 0, 0, W, H);
+
+        i++;
+        setTimeout(() => requestAnimationFrame(drawStep), 55);
+      }
+      requestAnimationFrame(drawStep);
+    };
+
+    img.onerror = () => {
+      if (cancelled) return;
+      if (attempt < 1) setTimeout(() => setAttempt((a) => a + 1), 400);
+      else setFailed(true);
+    };
+
+    img.src = effectiveSrc;
+    return () => {
+      cancelled = true;
+    };
+  }, [src, attempt, failed]);
 
   if (!src || failed) {
     return <div style={{ ...style, ...placeholderStyle }}>{!src ? placeholderText : "Image unavailable"}</div>;
   }
 
-  const effectiveSrc = attempt === 0 ? src : src + (src.includes("?") ? "&" : "?") + "retry=" + attempt;
-
   return (
-    <img
-      key={effectiveSrc}
-      className="discovery-cover-reveal"
-      src={effectiveSrc}
-      alt={alt}
-      style={style}
-      onError={() => {
-        if (attempt < 1) {
-          setTimeout(() => setAttempt((a) => a + 1), 400);
-        } else {
-          setFailed(true);
-        }
-      }}
-    />
+    <div ref={containerRef} style={style} role="img" aria-label={alt}>
+      <canvas
+        ref={canvasRef}
+        style={{ width: "100%", height: "100%", display: "block", opacity: revealed ? 1 : 0.98 }}
+      />
+    </div>
   );
 }
 
@@ -418,6 +473,37 @@ async function randomFromCollection(items, filters, excluded, needsDetail, extra
   return { found: null, foundDetail: null, anyResultsAtAll: true };
 }
 
+function Turntable({ size = 64 }) {
+  return (
+    <div style={{ width: size, height: size, flexShrink: 0 }}>
+      <svg viewBox="0 0 100 100" width={size} height={size}>
+        {/* platter base */}
+        <circle cx="50" cy="50" r="48" fill={PALETTE.borderStrong} />
+        <circle cx="50" cy="50" r="44" fill={PALETTE.primary} />
+
+        {/* spinning record */}
+        <g className="discovery-record-spin" style={{ transformOrigin: "50px 50px" }}>
+          <circle cx="50" cy="50" r="40" fill="#1b1b1b" />
+          {/* grooves */}
+          <circle cx="50" cy="50" r="34" fill="none" stroke="#333" strokeWidth="0.6" />
+          <circle cx="50" cy="50" r="28" fill="none" stroke="#333" strokeWidth="0.6" />
+          <circle cx="50" cy="50" r="22" fill="none" stroke="#333" strokeWidth="0.6" />
+          {/* label */}
+          <circle cx="50" cy="50" r="14" fill={PALETTE.accent} />
+          <circle cx="50" cy="50" r="2.5" fill={PALETTE.bg} />
+        </g>
+
+        {/* tonearm */}
+        <g>
+          <circle cx="82" cy="22" r="5" fill={PALETTE.mutedLight} />
+          <line x1="82" y1="22" x2="65" y2="39" stroke={PALETTE.mutedLight} strokeWidth="3" strokeLinecap="round" />
+          <circle cx="65" cy="39" r="2.5" fill={PALETTE.accentDark} />
+        </g>
+      </svg>
+    </div>
+  );
+}
+
 export default function App() {
   const [tab, setTab] = useState("discover"); // 'discover' | 'games'
   const [collectionSource, setCollectionSource] = useState(null); // { username } | null
@@ -428,6 +514,60 @@ export default function App() {
   return (
     <div style={styles.page}>
       <style>{`
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+          html, body { background: ${PALETTE.bg}; }
+
+      @keyframes discoveryFadeIn {
+          from { opacity: 0; transform: translateY(6px); }
+          to { opacity: 1; transform: translateY(0); }
+        }
+
+ @keyframes discoveryCardReveal {
+    from { opacity: 0; transform: translateY(14px) scale(0.97); }
+    to { opacity: 1; transform: translateY(0) scale(1); }
+  }
+  .discovery-card-reveal {
+    animation: discoveryCardReveal 0.45s cubic-bezier(0.16, 1, 0.3, 1);
+  }
+  .discovery-stagger > * {
+    opacity: 0;
+    animation: discoveryFadeIn 0.4s ease forwards;
+  }
+  .discovery-stagger > *:nth-child(1) { animation-delay: 0.08s; }
+  .discovery-stagger > *:nth-child(2) { animation-delay: 0.14s; }
+  .discovery-stagger > *:nth-child(3) { animation-delay: 0.20s; }
+  .discovery-stagger > *:nth-child(4) { animation-delay: 0.26s; }
+  .discovery-stagger > *:nth-child(n+5) { animation-delay: 0.32s; }
+
+  @keyframes discoveryFadeIn {
+    from { opacity: 0; transform: translateY(6px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+  @keyframes discoveryImageSharpen {
+    from { filter: blur(10px); opacity: 0.4; }
+    to { filter: blur(0); opacity: 1; }
+  }
+  @keyframes discoverySpin {
+    to { transform: rotate(360deg); }
+  }
+  .discovery-cover-reveal {
+    animation: discoveryImageSharpen 0.4s ease;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .discovery-cover-reveal, .discovery-card-reveal, .discovery-stagger > * { animation: none; opacity: 1; }
+  }
+      
+      @keyframes discoveryRecordSpin {
+        to { transform: rotate(360deg); }
+        }
+      .discovery-record-spin {
+        animation: discoveryRecordSpin 3s linear infinite;
+        }
+        @media (prefers-reduced-motion: reduce) {
+        .discovery-record-spin { animation: none; }
+        }
+
+        
         @keyframes discoveryFadeIn {
           from { opacity: 0; transform: translateY(6px); }
           to { opacity: 1; transform: translateY(0); }
@@ -447,10 +587,13 @@ export default function App() {
         }
       `}</style>
       <div style={styles.container}>
-        <header style={styles.header}>
-          <h1 style={styles.title}>Random Discovery</h1>
-          <p style={styles.subtitle}>Explore the depths of Discogs releases at random (kind of) or play a few mini games.</p>
-        </header>
+<header style={{ ...styles.header, display: "flex", alignItems: "center", gap: 16 }}>
+  <Turntable size={64} />
+  <div>
+    <h1 style={styles.title}>Random Discovery</h1>
+    <p style={styles.subtitle}>Explore the depths of Discogs releases at random (kind of) or play a few mini games.</p>
+  </div>
+</header>
 
         <div style={styles.tabRow}>
           <button
@@ -800,13 +943,13 @@ function DiscoverTab({ collectionSource, collectionItems }) {
   // "Hidden Gem" — well-loved but rarely owned: rating > 4.2 with fewer than 100 haves.
   function handleHiddenGem() {
     weirderCeilingRef.current = null;
-    setModeNotice("Hunting for a hidden gem (rating > 4.2, under 100 haves)…");
+    setModeNotice("Hunting for a hidden gem (rating > 4.2, 10+ ratings, under 100 haves)…");
     findRelease({
       label: "Hunting for a hidden gem…",
       extraCheck: (full) => {
         const r = full.community?.rating;
         const have = full.community?.have;
-        return !!r && r.count > 0 && r.average > 4.2 && typeof have === "number" && have < 100;
+        return !!r && r.count >= 10 && r.average > 4.2 && typeof have === "number" && have < 200;
       },
     });
   }
@@ -982,7 +1125,7 @@ function DiscoverTab({ collectionSource, collectionItems }) {
       </div>
 
       {result && (
-        <div style={{ ...styles.card, ...(loading ? styles.cardDimmed : {}) }} ref={resultRef}>
+        <div className="discovery-card-reveal" key={result.id} style={{ ...styles.card, ...(loading ? styles.cardDimmed : {}) }} ref={resultRef}>
           <div style={styles.coverWrap}>
             <a href={releaseUrl} target="_blank" rel="noreferrer" style={styles.coverLink} aria-label={`View ${title} on Discogs`}>
               <SmartImage
@@ -1014,7 +1157,7 @@ function DiscoverTab({ collectionSource, collectionItems }) {
               </>
             )}
           </div>
-          <div style={styles.cardBody}>
+          <div className="discovery-stagger" style={styles.cardBody}>
             <h2 style={styles.cardTitle}>
               <a href={releaseUrl} target="_blank" rel="noreferrer" style={styles.titleLink}>{title}</a>
             </h2>
@@ -1068,10 +1211,10 @@ function DiscoverTab({ collectionSource, collectionItems }) {
                     style={styles.styleChip}
                     onClick={() => handleRabbitHole(s)}
                     disabled={loading}
-                    title="Rabbit hole: search this genre + style"
-                  >
-                    🐇 {s}
-                  </button>
+                    title="Dig into this genre + style"
+                      >
+                      <span style={{ color: PALETTE.accentDark, fontWeight: 700 }}>⟳</span> {s}
+                      </button>
                 ))}
               </div>
             )}
@@ -1124,13 +1267,13 @@ function DiscoverTab({ collectionSource, collectionItems }) {
             🌀 Obscurer
           </button>
           <button style={{ ...styles.modeButton, ...(loading ? styles.modeButtonDisabled : {}) }} onClick={handleHiddenGem} disabled={loading}>
-            💎 Hidden gem
+            💎 High Ratings, Low Haves
           </button>
         </div>
       ) : (
         <div style={styles.discoveryModeRow}>
           <button style={{ ...styles.modeButton, ...(loading ? styles.modeButtonDisabled : {}) }} onClick={handleHiddenGem} disabled={loading}>
-            💎 Hidden gem
+            💎 High Ratings, Low Haves
           </button>
         </div>
       )}
@@ -1392,12 +1535,13 @@ function HigherLowerGame({ collectionItems }) {
 
       {champion && challenger && (
         <div style={styles.duelRow}>
-          <GameCard release={champion} statMeta={statMeta} role="Champion" statRevealed value={champion.value} />
+          <GameCard release={champion} statMeta={statMeta} role="Champion" statRevealed value={champion.value} key={champion.pick.id} />
           <div style={styles.vsCol}>
             <span style={styles.vsText}>vs</span>
           </div>
           <GameCard
-            release={challenger}
+  release={challenger}
+  key={challenger.pick.id}
             statMeta={statMeta}
             role="Challenger"
             statRevealed={revealed}
@@ -1427,13 +1571,14 @@ function GameCard({ release, statMeta, role, statRevealed, value, resultBanner }
   const cover = detail?.images?.[0]?.uri || detail?.images?.[0]?.uri150 || pick?.cover_image || null;
 
   return (
-    <div style={styles.gameCard}>
+    <div className="discovery-card-reveal" style={styles.gameCard}>
       <span style={styles.roleLabel}>{role}</span>
-      {cover ? (
-        <img key={cover} className="discovery-cover-reveal" src={cover} alt={pick.title} style={styles.gameCover} />
-      ) : (
-        <div style={{ ...styles.gameCover, ...styles.coverPlaceholder }}>No image</div>
-      )}
+      <SmartImage
+        src={cover}
+        alt={pick.title}
+        style={styles.gameCover}
+        placeholderStyle={styles.coverPlaceholder}
+      />
       <div style={styles.gameCardBody}>
         <p style={styles.gameCardTitle}>{pick.title}</p>
         <p style={styles.gameCardStat}>
@@ -1639,13 +1784,14 @@ function GuessGenreGame({ collectionItems }) {
       {loading && !round && <div style={styles.emptyBox}>Pulling a cover…</div>}
 
       {round && (
-        <div style={styles.genreCard}>
+        <div className="discovery-card-reveal" key={round.pick.id} style={styles.genreCard}>
           <div style={styles.coverWrap}>
-            {cover ? (
-              <img key={cover} className="discovery-cover-reveal" src={cover} alt={phase === "revealed" ? round.pick.title : "Guess the genre"} style={styles.genreCover} />
-            ) : (
-              <div style={{ ...styles.genreCover, ...styles.coverPlaceholder }}>No image</div>
-            )}
+            <SmartImage
+              src={cover}
+              alt={phase === "revealed" ? round.pick.title : "Guess the genre"}
+              style={styles.genreCover}
+              placeholderStyle={styles.coverPlaceholder}
+            />
             {images.length > 1 && (
               <>
                 <button
