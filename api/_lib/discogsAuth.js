@@ -78,7 +78,7 @@ export async function getRequestToken(consumerKey, consumerSecret, callbackUrl) 
     headers: { Authorization: header, "User-Agent": USER_AGENT },
   });
   const body = await res.text();
-  if (!res.ok) throw new Error("Discogs rejected the login request. Please try again.");
+  if (!res.ok) throw new Error(`Discogs rejected the login request (${res.status}): ${body || "no response body"}`);
   return parseFormEncoded(body); // { oauth_token, oauth_token_secret, oauth_callback_confirmed }
 }
 
