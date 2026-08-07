@@ -387,15 +387,15 @@ async function randomReleaseSearch(baseParams, excluded, signal) {
 
 const COLLECTION_PER_PAGE = 100;
 
-async function fetchFullCollection(username, signal, onProgress) {
+async function fetchFullCollection({ username, useAuth = false } = {}, signal, onProgress) {
   let page = 1;
   let pages = 1;
   const items = [];
   do {
-    const data = await apiFetch(
-      { kind: "collection", username, page: String(page), per_page: String(COLLECTION_PER_PAGE) },
-      signal
-    );
+    const params = useAuth
+      ? { kind: "my-collection", page: String(page), per_page: String(COLLECTION_PER_PAGE) }
+      : { kind: "collection", username, page: String(page), per_page: String(COLLECTION_PER_PAGE) };
+    const data = await apiFetch(params, signal);
     pages = data?.pagination?.pages || 1;
     items.push(...(data?.releases || []));
     onProgress?.(items.length, data?.pagination?.items || items.length);
@@ -639,7 +639,52 @@ function CollectionBar({ collectionSource, setCollectionSource, collectionItems,
   const [draftUsername, setDraftUsername] = useState("");
   const requestRef = useRef(null);
 
-  async function connect(username) {
+  const loadPrivateCollection = useCallback(
+    async (username) => {
+      requestRef.current?.abort();
+      const controller = new AbortController();
+      requestRef.current = controller;
+      setError("");
+      setLoading(true);
+      setCollectionItems(null);
+      try {
+        const items = await fetchFullCollection({ useAuth: true }, controller.signal);
+        if (controller.signal.aborted) return;
+        setCollectionSource({ username, private: true });
+        setCollectionItems(items);
+        setLoading(false);
+      } catch (e) {
+        if (e.name === "AbortError") return;
+        setError(e.message || "Couldn't load your collection.");
+        setLoading(false);
+      }
+    },
+    [setCollectionSource, setCollectionItems, setError, setLoading]
+  );
+
+  // On mount: pick up either a just-finished login redirect (?login=success/failed) or an
+  // already-active session from a previous visit, so a returning visitor doesn't have to
+  // click "Log in with Discogs" again every time.
+  useEffect(() => {
+    const searchParams = new URLSearchParams(window.location.search);
+    const loginResult = searchParams.get("login");
+    if (loginResult) {
+      window.history.replaceState({}, "", window.location.pathname);
+    }
+    if (loginResult === "failed") {
+      setError("Discogs login didn't go through. Please try again.");
+      return;
+    }
+    fetch("/api/auth-status")
+      .then((r) => r.json())
+      .then((status) => {
+        if (status.authenticated) loadPrivateCollection(status.username);
+      })
+      .catch(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  async function connectPublic(username) {
     requestRef.current?.abort();
     const controller = new AbortController();
     requestRef.current = controller;
@@ -647,14 +692,14 @@ function CollectionBar({ collectionSource, setCollectionSource, collectionItems,
     setLoading(true);
     setCollectionItems(null);
     try {
-      const items = await fetchFullCollection(username, controller.signal);
+      const items = await fetchFullCollection({ username }, controller.signal);
       if (controller.signal.aborted) return;
       if (items.length === 0) {
         setError("That collection came back empty — double check the username, or that the collection isn't empty.");
         setLoading(false);
         return;
       }
-      setCollectionSource({ username });
+      setCollectionSource({ username, private: false });
       setCollectionItems(items);
       setLoading(false);
     } catch (e) {
@@ -664,8 +709,15 @@ function CollectionBar({ collectionSource, setCollectionSource, collectionItems,
     }
   }
 
-  function disconnect() {
+  async function disconnect() {
     requestRef.current?.abort();
+    if (collectionSource?.private) {
+      try {
+        await fetch("/api/auth-logout", { method: "POST" });
+      } catch {
+        // Non-fatal — the cookie will just get overwritten on the next login attempt.
+      }
+    }
     setCollectionSource(null);
     setCollectionItems(null);
     setError("");
@@ -674,8 +726,13 @@ function CollectionBar({ collectionSource, setCollectionSource, collectionItems,
   if (collectionSource) {
     return (
       <div style={styles.collectionBar}>
-        <span>🔒 Playing from <strong>{collectionSource.username}</strong>'s collection ({collectionItems?.length ?? 0} releases)</span>
-        <button style={styles.collectionChangeBtn} onClick={disconnect}>Change</button>
+        <span>
+          🔒 Playing from <strong>{collectionSource.username}</strong>'s collection ({collectionItems?.length ?? 0} releases)
+          {collectionSource.private ? " · private" : ""}
+        </span>
+        <button style={styles.collectionChangeBtn} onClick={disconnect}>
+          {collectionSource.private ? "Log out" : "Change"}
+        </button>
       </div>
     );
   }
@@ -684,19 +741,22 @@ function CollectionBar({ collectionSource, setCollectionSource, collectionItems,
     <div style={styles.collectionBar}>
       <input
         style={styles.collectionInput}
-        placeholder="Discogs username"
+        placeholder="Discogs username (public collection)"
         value={draftUsername}
         onChange={(e) => setDraftUsername(e.target.value)}
-        onKeyDown={(e) => e.key === "Enter" && draftUsername.trim() && connect(draftUsername.trim())}
+        onKeyDown={(e) => e.key === "Enter" && draftUsername.trim() && connectPublic(draftUsername.trim())}
         disabled={loading}
       />
       <button
         style={styles.collectionConnectBtn}
-        onClick={() => draftUsername.trim() && connect(draftUsername.trim())}
+        onClick={() => draftUsername.trim() && connectPublic(draftUsername.trim())}
         disabled={loading || !draftUsername.trim()}
       >
         {loading ? "Loading…" : "Connect"}
       </button>
+      <a href="/api/auth-start" style={styles.collectionLoginBtn}>
+        🔒 Log in with Discogs
+      </a>
       {error && <p style={{ ...styles.hintText, color: PALETTE.danger, width: "100%" }}>{error}</p>}
     </div>
   );
@@ -1944,6 +2004,18 @@ const styles = {
     fontSize: 12,
     fontWeight: 600,
     cursor: "pointer",
+  },
+  collectionLoginBtn: {
+    padding: "9px 14px",
+    borderRadius: 7,
+    border: `1px solid ${PALETTE.accentDark}`,
+    background: "#fff",
+    color: PALETTE.accentDark,
+    fontSize: 13,
+    fontWeight: 700,
+    textDecoration: "none",
+    cursor: "pointer",
+    whiteSpace: "nowrap",
   },
 
   gameTabRow: { display: "flex", gap: 8, marginBottom: 18 },
