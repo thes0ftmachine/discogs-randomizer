@@ -775,7 +775,7 @@ function CollectionBar({ collectionSource, setCollectionSource, collectionItems,
   if (!expanded) {
     return (
       <div style={styles.collectionBarCollapsed}>
-        <span style={styles.collectionBarCollapsedText}>🎲 Discovering the whole Discogs catalog</span>
+        <span style={styles.collectionBarCollapsedText}> Discovering the whole Discogs catalog</span>
         <button type="button" style={styles.collectionExpandBtn} onClick={() => setExpanded(true)}>
           Connect a collection (optional) →
         </button>
@@ -787,7 +787,7 @@ function CollectionBar({ collectionSource, setCollectionSource, collectionItems,
     <div style={styles.collectionBar}>
       <div style={styles.collectionBarHeaderRow}>
         <span style={styles.hintText}>
-          Optional — scopes Discover &amp; Games to one Discogs collection instead of the whole catalog.
+          Optional! This filters Discover &amp; Games to one Discogs collection instead of the whole catalog. If you have a private account, use the login option to safely and temporarily connect your account to this app. This uses proper Discogs OAuth 1.0a to connect your account. 
         </span>
         <button type="button" style={styles.collectionCollapseBtn} onClick={() => setExpanded(false)}>
           Hide ✕
