@@ -655,9 +655,17 @@ export default function App() {
 // ============================== COLLECTION BAR ==============================
 // Always-visible strip between the tabs and whichever tab is active. Connecting here scopes
 // both Discover and Games to the connected collection — it isn't a separate destination.
+//
+// Three visual states:
+//  1. Connected            — compact "playing from X's collection" strip (unchanged).
+//  2. Not connected, closed — a single low-key line making clear this is optional; the
+//     app works globally with zero setup. This is the default.
+//  3. Not connected, open  — today's username/login form, reachable via the closed state's
+//     "Connect a collection" button, with a way to collapse it again.
 
 function CollectionBar({ collectionSource, setCollectionSource, collectionItems, setCollectionItems, loading, setLoading, error, setError }) {
   const [draftUsername, setDraftUsername] = useState("");
+  const [expanded, setExpanded] = useState(false);
   const requestRef = useRef(null);
 
   const loadPrivateCollection = useCallback(
@@ -704,6 +712,12 @@ function CollectionBar({ collectionSource, setCollectionSource, collectionItems,
       .catch(() => {});
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // A failed login or a bad public lookup should never be hidden behind a collapsed bar —
+  // surface it by opening the panel automatically.
+  useEffect(() => {
+    if (error) setExpanded(true);
+  }, [error]);
 
   async function connectPublic(username) {
     requestRef.current?.abort();
@@ -758,8 +772,27 @@ function CollectionBar({ collectionSource, setCollectionSource, collectionItems,
     );
   }
 
+  if (!expanded) {
+    return (
+      <div style={styles.collectionBarCollapsed}>
+        <span style={styles.collectionBarCollapsedText}>🎲 Discovering the whole Discogs catalog</span>
+        <button type="button" style={styles.collectionExpandBtn} onClick={() => setExpanded(true)}>
+          Connect a collection (optional) →
+        </button>
+      </div>
+    );
+  }
+
   return (
     <div style={styles.collectionBar}>
+      <div style={styles.collectionBarHeaderRow}>
+        <span style={styles.hintText}>
+          Optional — scopes Discover &amp; Games to one Discogs collection instead of the whole catalog.
+        </span>
+        <button type="button" style={styles.collectionCollapseBtn} onClick={() => setExpanded(false)}>
+          Hide ✕
+        </button>
+      </div>
       <input
         style={styles.collectionInput}
         placeholder="Discogs username (public collection)"
@@ -1996,6 +2029,46 @@ const styles = {
     background: PALETTE.card,
     fontSize: 13,
     color: PALETTE.primary,
+  },
+  collectionBarCollapsed: {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 10,
+    padding: "9px 14px",
+    marginBottom: 18,
+    borderRadius: 10,
+    border: `1px dashed ${PALETTE.border}`,
+    background: "transparent",
+    fontSize: 12.5,
+  },
+  collectionBarCollapsedText: { color: PALETTE.mutedLight, fontWeight: 600 },
+  collectionExpandBtn: {
+    border: "none",
+    background: "none",
+    color: PALETTE.accentDark,
+    fontSize: 12.5,
+    fontWeight: 700,
+    cursor: "pointer",
+    padding: 0,
+    whiteSpace: "nowrap",
+  },
+  collectionBarHeaderRow: {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 8,
+    width: "100%",
+  },
+  collectionCollapseBtn: {
+    border: "none",
+    background: "none",
+    color: PALETTE.mutedLight,
+    fontSize: 12,
+    fontWeight: 600,
+    cursor: "pointer",
+    padding: 0,
+    whiteSpace: "nowrap",
   },
   collectionInput: {
     flex: 1,
