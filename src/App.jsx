@@ -1,6 +1,6 @@
 import React, { useState, useMemo, useEffect, useCallback, useRef } from "react";
 
-// ---- Controlled vocab (mirrors Discogs' own genre/style taxonomy, trimmed to common picks) ----
+// ---- controlled vocab (mirrors Discogs' own genre/style taxonomy, trimmed to common picks) ----
 const GENRE_STYLES = {
   "Any Genre": [],
 "Blues": [
@@ -999,11 +999,11 @@ function DiscoverTab({ collectionSource, collectionItems }) {
         setEmptyNotice(
           inCollectionMode
             ? (anyResultsAtAll
-                ? "Found matches in the collection, but none cleared the extra filters. Try loosening things a bit."
+                ? "Found matches in the collection, but none cleared the extra filters. Sorry, this hurt my head. Try loosening things a bit or hitting refresh and giving me a second."
                 : "Nothing in this collection matched that combination. Try loosening a filter.")
             : (anyResultsAtAll
-                ? "Found matches, but couldn't find one that also cleared the extra filters after several tries. Try loosening things a bit."
-                : "Nothing matched that combination. Try loosening a filter — style and country are the most restrictive.")
+                ? "Found matches, but couldn't find one that also cleared the extra filters after several tries. This could be a bug. It could be Discogs being overwhelemed by the request... Try loosening things a bit or refreshing the window."
+                : "Nothing matched that combination. Or Discogs is just being a pain in the butt. Try loosening a filter — style and country are the most restrictive. Or if that doesn't make sense, just hit refresh!")
         );
         setLoading(false);
         return null;
@@ -1381,13 +1381,13 @@ function DiscoverTab({ collectionSource, collectionItems }) {
             🌀 Obscurer
           </button>
           <button style={{ ...styles.modeButton, ...(loading ? styles.modeButtonDisabled : {}) }} onClick={handleHiddenGem} disabled={loading}>
-            💎 High Ratings, Low Haves
+            ↕️ High Ratings, Low Haves
           </button>
         </div>
       ) : (
         <div style={styles.discoveryModeRow}>
           <button style={{ ...styles.modeButton, ...(loading ? styles.modeButtonDisabled : {}) }} onClick={handleHiddenGem} disabled={loading}>
-            💎 High Ratings, Low Haves
+            ↕️ High Ratings, Low Haves
           </button>
         </div>
       )}
@@ -1561,7 +1561,7 @@ function HigherLowerGame({ collectionItems }) {
     setRevealed(false);
     setLastCorrect(null);
     setScore(0);
-    // Old cards hold values measured against the previous stat — clearing them stops a
+    // Old cards hold values measured against the previous stat ... clearing them stops a
     // stale pairing from sitting under a mismatched label while the new draw runs.
     setChampion(null);
     setChallenger(null);
@@ -1710,7 +1710,7 @@ function GameCard({ release, statMeta, role, statRevealed, value, resultBanner }
 
 // ============================== GUESS THE GENRE GAME ==============================
 
-// Canonical Discogs top-level genre list (15 total) — used both as the guess grid and as
+// Canonical Discogs top-level genre list (15 total), used both as the guess grid and as
 // the source of truth we check guesses against.
 const GAME_GENRES = [
   "Blues", "Brass & Military", "Children's", "Classical", "Electronic",
