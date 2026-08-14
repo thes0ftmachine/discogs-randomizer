@@ -1,6 +1,6 @@
 import React, { useState, useMemo, useEffect, useCallback, useRef } from "react";
 
-// ---- controlled vocab (mirrors Discogs' own genre/style taxonomy, trimmed to common picks) ----
+// ---- Controlled vocab (mirrors Discogs' own genre/style taxonomy, trimmed to common picks) ----
 const GENRE_STYLES = {
   "Any Genre": [],
 "Blues": [
@@ -408,6 +408,62 @@ async function randomReleaseSearch(baseParams, excluded, signal) {
 
 const COLLECTION_PER_PAGE = 100;
 
+// A page request has no built-in timeout, so a stalled mobile connection (switching
+// networks, backgrounding the tab mid-load) could otherwise leave the caller's promise
+// pending forever with no error and no way to recover except reloading. This wraps a
+// single apiFetch call with its own timeout, independent of the outer AbortController that
+// governs the whole multi-page operation, and turns a stall into a normal thrown error.
+async function apiFetchWithTimeout(params, signal, timeoutMs = 15000) {
+  const localController = new AbortController();
+  const onOuterAbort = () => localController.abort();
+  if (signal) {
+    if (signal.aborted) localController.abort();
+    else signal.addEventListener("abort", onOuterAbort);
+  }
+  const timer = setTimeout(() => localController.abort(), timeoutMs);
+  try {
+    return await apiFetch(params, localController.signal);
+  } catch (e) {
+    // Only relabel this as a timeout if OUR timer fired — if the caller's own signal was
+    // aborted (e.g. the user disconnected, or a newer request superseded this one), that's
+    // a normal cancellation and should keep behaving like one (e.name === "AbortError").
+    if (localController.signal.aborted && !(signal && signal.aborted)) {
+      const timeoutError = new Error("That request to Discogs took too long and timed out.");
+      timeoutError.name = "TimeoutError";
+      throw timeoutError;
+    }
+    throw e;
+  } finally {
+    clearTimeout(timer);
+    if (signal) signal.removeEventListener("abort", onOuterAbort);
+  }
+}
+
+// Fetches one page with a timeout, retrying a couple of times on a stall or transient
+// hiccup before giving up — so a single flaky request degrades to a visible error instead
+// of an infinite spinner.
+async function fetchCollectionPage(params, signal, maxAttempts = 3) {
+  let lastError;
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    if (signal?.aborted) {
+      const abortError = new Error("Aborted");
+      abortError.name = "AbortError";
+      throw abortError;
+    }
+    try {
+      return await apiFetchWithTimeout(params, signal);
+    } catch (e) {
+      if (e.name === "AbortError") throw e;
+      lastError = e;
+      // Back off a bit before retrying — mirrors the retry-after handling used elsewhere
+      // in the app for genuine rate-limit responses, otherwise just a short pause.
+      const waitMs = e.retryAfter ? e.retryAfter * 1000 : 800 * (attempt + 1);
+      if (attempt < maxAttempts - 1) await sleep(waitMs);
+    }
+  }
+  throw lastError || new Error("Couldn't load that page of the collection.");
+}
+
 async function fetchFullCollection({ username, useAuth = false } = {}, signal, onProgress) {
   let page = 1;
   let pages = 1;
@@ -416,7 +472,7 @@ async function fetchFullCollection({ username, useAuth = false } = {}, signal, o
     const params = useAuth
       ? { kind: "my-collection", page: String(page), per_page: String(COLLECTION_PER_PAGE) }
       : { kind: "collection", username, page: String(page), per_page: String(COLLECTION_PER_PAGE) };
-    const data = await apiFetch(params, signal);
+    const data = await fetchCollectionPage(params, signal);
     pages = data?.pagination?.pages || 1;
     items.push(...(data?.releases || []));
     onProgress?.(items.length, data?.pagination?.items || items.length);
@@ -655,37 +711,43 @@ export default function App() {
 // ============================== COLLECTION BAR ==============================
 // Always-visible strip between the tabs and whichever tab is active. Connecting here scopes
 // both Discover and Games to the connected collection — it isn't a separate destination.
-//
-// Three visual states:
-//  1. Connected            — compact "playing from X's collection" strip (unchanged).
-//  2. Not connected, closed — a single low-key line making clear this is optional; the
-//     app works globally with zero setup. This is the default.
-//  3. Not connected, open  — today's username/login form, reachable via the closed state's
-//     "Connect a collection" button, with a way to collapse it again.
 
 function CollectionBar({ collectionSource, setCollectionSource, collectionItems, setCollectionItems, loading, setLoading, error, setError }) {
   const [draftUsername, setDraftUsername] = useState("");
-  const [expanded, setExpanded] = useState(false);
+  const [progress, setProgress] = useState(null); // { loaded, total } | null
   const requestRef = useRef(null);
+  // Tracks what the in-flight request is for, so a visibilitychange handler firing later
+  // knows whether (and how) to resume it.
+  const pendingLoadRef = useRef(null); // { type: "private", username } | { type: "public", username } | null
 
   const loadPrivateCollection = useCallback(
     async (username) => {
       requestRef.current?.abort();
       const controller = new AbortController();
       requestRef.current = controller;
+      pendingLoadRef.current = { type: "private", username };
       setError("");
       setLoading(true);
+      setProgress(null);
       setCollectionItems(null);
       try {
-        const items = await fetchFullCollection({ useAuth: true }, controller.signal);
+        const items = await fetchFullCollection({ useAuth: true }, controller.signal, (loaded, total) =>
+          setProgress({ loaded, total })
+        );
         if (controller.signal.aborted) return;
         setCollectionSource({ username, private: true });
         setCollectionItems(items);
         setLoading(false);
+        pendingLoadRef.current = null;
       } catch (e) {
         if (e.name === "AbortError") return;
-        setError(e.message || "Couldn't load your collection.");
+        setError(
+          e.name === "TimeoutError"
+            ? "Discogs stopped responding while loading your collection (this can happen on a spotty mobile connection). Tap Retry."
+            : e.message || "Couldn't load your collection."
+        );
         setLoading(false);
+        pendingLoadRef.current = null;
       }
     },
     [setCollectionSource, setCollectionItems, setError, setLoading]
@@ -713,39 +775,73 @@ function CollectionBar({ collectionSource, setCollectionSource, collectionItems,
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // A failed login or a bad public lookup should never be hidden behind a collapsed bar —
-  // surface it by opening the panel automatically.
+  // Mobile browsers can pause or kill in-flight network requests when a tab is backgrounded
+  // (locking the phone, switching apps mid-load). Without this, a paginated collection load
+  // that gets backgrounded partway through can come back to a foreground tab with a promise
+  // that will now never settle — `loading` stays true forever with no error and no recourse
+  // but a manual refresh. Aborting on hide and re-kicking the same load on the next visible
+  // turns that into a normal retry instead of a silent hang.
   useEffect(() => {
-    if (error) setExpanded(true);
-  }, [error]);
+    function handleVisibilityChange() {
+      if (document.visibilityState === "hidden") {
+        if (loading) requestRef.current?.abort();
+        return;
+      }
+      // visible again
+      const pending = pendingLoadRef.current;
+      if (!pending) return;
+      if (pending.type === "private") loadPrivateCollection(pending.username);
+      else if (pending.type === "public") connectPublicRef.current?.(pending.username);
+    }
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    return () => document.removeEventListener("visibilitychange", handleVisibilityChange);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loading, loadPrivateCollection]);
+
+  // connectPublic is defined below and referenced by the visibility handler above; a ref
+  // avoids having to reorder declarations or wrap connectPublic in its own useCallback.
+  const connectPublicRef = useRef(null);
 
   async function connectPublic(username) {
     requestRef.current?.abort();
     const controller = new AbortController();
     requestRef.current = controller;
+    pendingLoadRef.current = { type: "public", username };
     setError("");
     setLoading(true);
+    setProgress(null);
     setCollectionItems(null);
     try {
-      const items = await fetchFullCollection({ username }, controller.signal);
+      const items = await fetchFullCollection({ username }, controller.signal, (loaded, total) =>
+        setProgress({ loaded, total })
+      );
       if (controller.signal.aborted) return;
       if (items.length === 0) {
         setError("That collection came back empty — double check the username, or that the collection isn't empty.");
         setLoading(false);
+        pendingLoadRef.current = null;
         return;
       }
       setCollectionSource({ username, private: false });
       setCollectionItems(items);
       setLoading(false);
+      pendingLoadRef.current = null;
     } catch (e) {
       if (e.name === "AbortError") return;
-      setError(e.message || "Couldn't load that collection.");
+      setError(
+        e.name === "TimeoutError"
+          ? "Discogs stopped responding while loading that collection. Tap Connect to retry."
+          : e.message || "Couldn't load that collection."
+      );
       setLoading(false);
+      pendingLoadRef.current = null;
     }
   }
+  connectPublicRef.current = connectPublic;
 
   async function disconnect() {
     requestRef.current?.abort();
+    pendingLoadRef.current = null;
     if (collectionSource?.private) {
       try {
         await fetch("/api/auth-logout", { method: "POST" });
@@ -756,6 +852,13 @@ function CollectionBar({ collectionSource, setCollectionSource, collectionItems,
     setCollectionSource(null);
     setCollectionItems(null);
     setError("");
+  }
+
+  function retry() {
+    const pending = pendingLoadRef.current;
+    if (pending?.type === "private") loadPrivateCollection(pending.username);
+    else if (pending?.type === "public") connectPublic(pending.username);
+    else if (draftUsername.trim()) connectPublic(draftUsername.trim());
   }
 
   if (collectionSource) {
@@ -772,27 +875,8 @@ function CollectionBar({ collectionSource, setCollectionSource, collectionItems,
     );
   }
 
-  if (!expanded) {
-    return (
-      <div style={styles.collectionBarCollapsed}>
-        <span style={styles.collectionBarCollapsedText}> Discovering the whole Discogs catalog</span>
-        <button type="button" style={styles.collectionExpandBtn} onClick={() => setExpanded(true)}>
-          Connect a collection (optional) →
-        </button>
-      </div>
-    );
-  }
-
   return (
     <div style={styles.collectionBar}>
-      <div style={styles.collectionBarHeaderRow}>
-        <span style={styles.hintText}>
-          Optional! This filters Discover &amp; Games to one Discogs collection instead of the whole catalog. If you have a private account, use the login option to safely and temporarily connect your account to this app. This uses proper Discogs OAuth 1.0a to connect your account. 
-        </span>
-        <button type="button" style={styles.collectionCollapseBtn} onClick={() => setExpanded(false)}>
-          Hide ✕
-        </button>
-      </div>
       <input
         style={styles.collectionInput}
         placeholder="Discogs username (public collection)"
@@ -806,12 +890,28 @@ function CollectionBar({ collectionSource, setCollectionSource, collectionItems,
         onClick={() => draftUsername.trim() && connectPublic(draftUsername.trim())}
         disabled={loading || !draftUsername.trim()}
       >
-        {loading ? "Loading…" : "Connect"}
+        {loading
+          ? progress?.total
+            ? `Loading… ${progress.loaded}/${progress.total}`
+            : "Loading…"
+          : "Connect"}
       </button>
       <a href="/api/auth-start" style={styles.collectionLoginBtn}>
         🔒 Log in with Discogs
       </a>
-      {error && <p style={{ ...styles.hintText, color: PALETTE.danger, width: "100%" }}>{error}</p>}
+      {loading && (
+        <button type="button" style={styles.collectionChangeBtn} onClick={() => requestRef.current?.abort()}>
+          Cancel
+        </button>
+      )}
+      {error && (
+        <div style={{ ...styles.hintText, width: "100%", display: "flex", alignItems: "center", gap: 8 }}>
+          <span style={{ color: PALETTE.danger }}>{error}</span>
+          <button type="button" style={styles.collectionChangeBtn} onClick={retry}>
+            Retry
+          </button>
+        </div>
+      )}
     </div>
   );
 }
@@ -999,11 +1099,11 @@ function DiscoverTab({ collectionSource, collectionItems }) {
         setEmptyNotice(
           inCollectionMode
             ? (anyResultsAtAll
-                ? "Found matches in the collection, but none cleared the extra filters. Sorry, this hurt my head. Try loosening things a bit or hitting refresh and giving me a second."
+                ? "Found matches in the collection, but none cleared the extra filters. Try loosening things a bit."
                 : "Nothing in this collection matched that combination. Try loosening a filter.")
             : (anyResultsAtAll
-                ? "Found matches, but couldn't find one that also cleared the extra filters after several tries. This could be a bug. It could be Discogs being overwhelemed by the request... Try loosening things a bit or refreshing the window."
-                : "Nothing matched that combination. Or Discogs is just being a pain in the butt. Try loosening a filter — style and country are the most restrictive. Or if that doesn't make sense, just hit refresh!")
+                ? "Found matches, but couldn't find one that also cleared the extra filters after several tries. Try loosening things a bit."
+                : "Nothing matched that combination. Try loosening a filter — style and country are the most restrictive.")
         );
         setLoading(false);
         return null;
@@ -1381,13 +1481,13 @@ function DiscoverTab({ collectionSource, collectionItems }) {
             🌀 Obscurer
           </button>
           <button style={{ ...styles.modeButton, ...(loading ? styles.modeButtonDisabled : {}) }} onClick={handleHiddenGem} disabled={loading}>
-            ↕️ High Ratings, Low Haves
+            💎 High Ratings, Low Haves
           </button>
         </div>
       ) : (
         <div style={styles.discoveryModeRow}>
           <button style={{ ...styles.modeButton, ...(loading ? styles.modeButtonDisabled : {}) }} onClick={handleHiddenGem} disabled={loading}>
-            ↕️ High Ratings, Low Haves
+            💎 High Ratings, Low Haves
           </button>
         </div>
       )}
@@ -1561,7 +1661,7 @@ function HigherLowerGame({ collectionItems }) {
     setRevealed(false);
     setLastCorrect(null);
     setScore(0);
-    // Old cards hold values measured against the previous stat ... clearing them stops a
+    // Old cards hold values measured against the previous stat — clearing them stops a
     // stale pairing from sitting under a mismatched label while the new draw runs.
     setChampion(null);
     setChallenger(null);
@@ -1710,7 +1810,7 @@ function GameCard({ release, statMeta, role, statRevealed, value, resultBanner }
 
 // ============================== GUESS THE GENRE GAME ==============================
 
-// Canonical Discogs top-level genre list (15 total), used both as the guess grid and as
+// Canonical Discogs top-level genre list (15 total) — used both as the guess grid and as
 // the source of truth we check guesses against.
 const GAME_GENRES = [
   "Blues", "Brass & Military", "Children's", "Classical", "Electronic",
@@ -2029,46 +2129,6 @@ const styles = {
     background: PALETTE.card,
     fontSize: 13,
     color: PALETTE.primary,
-  },
-  collectionBarCollapsed: {
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "space-between",
-    gap: 10,
-    padding: "9px 14px",
-    marginBottom: 18,
-    borderRadius: 10,
-    border: `1px dashed ${PALETTE.border}`,
-    background: "transparent",
-    fontSize: 12.5,
-  },
-  collectionBarCollapsedText: { color: PALETTE.mutedLight, fontWeight: 600 },
-  collectionExpandBtn: {
-    border: "none",
-    background: "none",
-    color: PALETTE.accentDark,
-    fontSize: 12.5,
-    fontWeight: 700,
-    cursor: "pointer",
-    padding: 0,
-    whiteSpace: "nowrap",
-  },
-  collectionBarHeaderRow: {
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "space-between",
-    gap: 8,
-    width: "100%",
-  },
-  collectionCollapseBtn: {
-    border: "none",
-    background: "none",
-    color: PALETTE.mutedLight,
-    fontSize: 12,
-    fontWeight: 600,
-    cursor: "pointer",
-    padding: 0,
-    whiteSpace: "nowrap",
   },
   collectionInput: {
     flex: 1,
