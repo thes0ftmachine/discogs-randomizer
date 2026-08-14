@@ -708,6 +708,48 @@ export default function App() {
   );
 }
 
+// A full collection load is the slowest thing this app does, and it's genuinely slow for a
+// large collection — pagination-with-timeouts fixes the "stuck forever" failure mode, but a
+// multi-hundred-item collection still takes real wall-clock time to re-page from scratch on
+// every single visit. Caching the last successful load in localStorage means a same-session
+// (or same-day) reopen can skip the network entirely and show the collection instantly.
+const COLLECTION_CACHE_VERSION = "v1";
+const COLLECTION_CACHE_TTL_MS = 30 * 60 * 1000; // 30 min — long enough to make reopens instant, short enough that new adds to the collection don't go stale for long.
+
+function collectionCacheKey(type, username) {
+  return `discogs-collection-cache:${COLLECTION_CACHE_VERSION}:${type}:${username.toLowerCase()}`;
+}
+
+function readCollectionCache(type, username) {
+  try {
+    const raw = window.localStorage.getItem(collectionCacheKey(type, username));
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (!parsed || !Array.isArray(parsed.items) || typeof parsed.timestamp !== "number") return null;
+    if (Date.now() - parsed.timestamp > COLLECTION_CACHE_TTL_MS) return null;
+    return parsed;
+  } catch {
+    return null; // corrupted entry, localStorage unavailable (private browsing), etc. — just skip caching
+  }
+}
+
+function writeCollectionCache(type, username, items) {
+  try {
+    window.localStorage.setItem(collectionCacheKey(type, username), JSON.stringify({ items, timestamp: Date.now() }));
+  } catch {
+    // Quota exceeded (a big collection's cover art URLs etc. add up) or storage unavailable —
+    // caching is a nice-to-have, not load-bearing, so fail silently rather than surfacing an error.
+  }
+}
+
+function clearCollectionCache(type, username) {
+  try {
+    window.localStorage.removeItem(collectionCacheKey(type, username));
+  } catch {
+    // no-op
+  }
+}
+
 // ============================== COLLECTION BAR ==============================
 // Always-visible strip between the tabs and whichever tab is active. Connecting here scopes
 // both Discover and Games to the connected collection — it isn't a separate destination.
@@ -721,12 +763,25 @@ function CollectionBar({ collectionSource, setCollectionSource, collectionItems,
   const pendingLoadRef = useRef(null); // { type: "private", username } | { type: "public", username } | null
 
   const loadPrivateCollection = useCallback(
-    async (username) => {
+    async (username, { forceRefresh = false } = {}) => {
       requestRef.current?.abort();
-      const controller = new AbortController();
-      requestRef.current = controller;
       pendingLoadRef.current = { type: "private", username };
       setError("");
+
+      if (!forceRefresh) {
+        const cached = readCollectionCache("private", username);
+        if (cached) {
+          setCollectionSource({ username, private: true });
+          setCollectionItems(cached.items);
+          setLoading(false);
+          setProgress(null);
+          pendingLoadRef.current = null;
+          return;
+        }
+      }
+
+      const controller = new AbortController();
+      requestRef.current = controller;
       setLoading(true);
       setProgress(null);
       setCollectionItems(null);
@@ -737,6 +792,7 @@ function CollectionBar({ collectionSource, setCollectionSource, collectionItems,
         if (controller.signal.aborted) return;
         setCollectionSource({ username, private: true });
         setCollectionItems(items);
+        writeCollectionCache("private", username, items);
         setLoading(false);
         pendingLoadRef.current = null;
       } catch (e) {
@@ -802,12 +858,25 @@ function CollectionBar({ collectionSource, setCollectionSource, collectionItems,
   // avoids having to reorder declarations or wrap connectPublic in its own useCallback.
   const connectPublicRef = useRef(null);
 
-  async function connectPublic(username) {
+  async function connectPublic(username, { forceRefresh = false } = {}) {
     requestRef.current?.abort();
-    const controller = new AbortController();
-    requestRef.current = controller;
     pendingLoadRef.current = { type: "public", username };
     setError("");
+
+    if (!forceRefresh) {
+      const cached = readCollectionCache("public", username);
+      if (cached) {
+        setCollectionSource({ username, private: false });
+        setCollectionItems(cached.items);
+        setLoading(false);
+        setProgress(null);
+        pendingLoadRef.current = null;
+        return;
+      }
+    }
+
+    const controller = new AbortController();
+    requestRef.current = controller;
     setLoading(true);
     setProgress(null);
     setCollectionItems(null);
@@ -824,6 +893,7 @@ function CollectionBar({ collectionSource, setCollectionSource, collectionItems,
       }
       setCollectionSource({ username, private: false });
       setCollectionItems(items);
+      writeCollectionCache("public", username, items);
       setLoading(false);
       pendingLoadRef.current = null;
     } catch (e) {
@@ -843,6 +913,7 @@ function CollectionBar({ collectionSource, setCollectionSource, collectionItems,
     requestRef.current?.abort();
     pendingLoadRef.current = null;
     if (collectionSource?.private) {
+      clearCollectionCache("private", collectionSource.username);
       try {
         await fetch("/api/auth-logout", { method: "POST" });
       } catch {
@@ -852,6 +923,12 @@ function CollectionBar({ collectionSource, setCollectionSource, collectionItems,
     setCollectionSource(null);
     setCollectionItems(null);
     setError("");
+  }
+
+  function syncNow() {
+    if (!collectionSource || loading) return;
+    if (collectionSource.private) loadPrivateCollection(collectionSource.username, { forceRefresh: true });
+    else connectPublic(collectionSource.username, { forceRefresh: true });
   }
 
   function retry() {
@@ -868,6 +945,9 @@ function CollectionBar({ collectionSource, setCollectionSource, collectionItems,
           🔒 Playing from <strong>{collectionSource.username}</strong>'s collection ({collectionItems?.length ?? 0} releases)
           {collectionSource.private ? " · private" : ""}
         </span>
+        <button style={styles.collectionChangeBtn} onClick={syncNow} disabled={loading}>
+          {loading ? "Syncing…" : "Sync now"}
+        </button>
         <button style={styles.collectionChangeBtn} onClick={disconnect}>
           {collectionSource.private ? "Log out" : "Change"}
         </button>
