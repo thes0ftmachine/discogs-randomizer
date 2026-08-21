@@ -2267,7 +2267,7 @@ const styles = {
     outlineColor: PALETTE.accent,
     outlineOffset: 2,
   },
-  gameTabButtonActive: { background: PALETTE.accent, color: "#c29d6c", borderColor: PALETTE.accent },
+  gameTabButtonActive: { background: PALETTE.accent, color: "#fff", borderColor: PALETTE.accent },
 
   comingSoon: {
     background: PALETTE.card,
