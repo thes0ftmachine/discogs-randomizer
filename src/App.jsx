@@ -167,7 +167,7 @@ const FORMAT_OPTIONS = ["Vinyl", "LP", "CD", "Cassette", "7\"", "10\"", "12\"", 
 const PALETTE = {
   bg: "#1E1610",
   card: "#251C15",
-  border: "#b8ac9e",
+  border: "#453629",
   borderStrong: "#5A4634",
   primary: "#EDE2D3",
   muted: "#C9B8A0",
