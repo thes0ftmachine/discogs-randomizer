@@ -668,7 +668,7 @@ export default function App() {
 <header style={{ ...styles.header, display: "flex", alignItems: "center", gap: 16 }}>
   <Turntable size={64} />
   <div>
-    <h1 style={styles.title}>Random Discovery</h1>
+    <h1 style={styles.title}>Discogs Randomizer</h1>
     <p style={styles.subtitle}>Explore the depths of Discogs releases at random (kind of) or play a few mini games.</p>
   </div>
 </header>
