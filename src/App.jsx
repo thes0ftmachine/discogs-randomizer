@@ -2258,7 +2258,7 @@ const styles = {
     flex: 1,
     padding: "8px 10px",
     borderRadius: 999,
-    border: `1px solid ${PALETTE.border}`,
+    border: `1px solid ${PALETTE.muted}`,
     background: PALETTE.card,
     fontSize: 13,
     fontWeight: 600,
@@ -2577,6 +2577,7 @@ const styles = {
     border: `1px solid ${PALETTE.border}`,
     fontSize: 14,
     background: PALETTE.card,
+    color: PALETTE.muted,
   },
   bonusButton: {
     padding: "10px 14px",
