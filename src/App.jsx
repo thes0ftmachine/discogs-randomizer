@@ -1068,7 +1068,15 @@ function DiscoverTab({ collectionSource, collectionItems }) {
 
   function buildParams(yearOverride) {
     const params = { type: "release" };
-    if (genre !== "Any Genre") params.genre = genre;
+    if (genre !== "Any Genre") {
+      params.genre = genre;
+    } else {
+      // Same fix as the games: an unfiltered vinyl search has tens of millions of matches,
+      // far more than our page cap can meaningfully sample, so it skews toward whatever
+      // Discogs' default ranking favors (heavily Electronic, then Rock). Picking a random
+      // genre per attempt keeps "Any Genre" spread evenly across the whole taxonomy instead.
+      params.genre = GAME_GENRES[Math.floor(Math.random() * GAME_GENRES.length)];
+    }
     if (style) params.style = style;
     if (country !== "Any Country") params.country = country;
     if (formats.length === 1) params.format = formats[0]; // Discogs only accepts one format value per query
