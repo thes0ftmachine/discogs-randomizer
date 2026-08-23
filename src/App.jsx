@@ -638,6 +638,27 @@ export default function App() {
       @keyframes discoveryRecordSpin {
         to { transform: rotate(360deg); }
         }
+      .diagnosticSection h4 {
+        font-size: 11px;
+        margin: 0 0 5px;
+        color: ${PALETTE.muted};
+        text-transform: uppercase;
+        letter-spacing: 0.4px;
+      }
+      .diagnosticTable th, .diagnosticTable td {
+        padding: 5px 6px;
+        border-bottom: 1px solid ${PALETTE.border};
+        text-align: left;
+        vertical-align: top;
+      }
+      .diagnosticTable th {
+        position: sticky;
+        top: 0;
+        background: ${PALETTE.bg};
+        color: ${PALETTE.muted};
+        font-weight: 700;
+      }
+
       .discovery-record-spin {
         animation: discoveryRecordSpin 3s linear infinite;
         }
@@ -1018,6 +1039,14 @@ function DiscoverTab({ collectionSource, collectionItems }) {
   const [modeNotice, setModeNotice] = useState("");
   const [imageIndex, setImageIndex] = useState(0);
 
+  // TEMP DIAGNOSTIC: records successful global-catalog draws so we can measure
+  // whether Discogs search ranking is producing a genre/decade bias.
+  const [diagnosticOpen, setDiagnosticOpen] = useState(false);
+  const [diagnosticRunning, setDiagnosticRunning] = useState(false);
+  const [diagnosticTarget, setDiagnosticTarget] = useState(50);
+  const [diagnosticRows, setDiagnosticRows] = useState([]);
+  const diagnosticAbortRef = useRef(null);
+
   const formRef = useRef(null);
   const resultRef = useRef(null);
   const statusRef = useRef(null);
@@ -1221,6 +1250,135 @@ function DiscoverTab({ collectionSource, collectionItems }) {
     }
   }
 
+  // TEMP DIAGNOSTIC ONLY.
+  // Runs the same global randomReleaseSearch() used by "Find something", but repeatedly
+  // with a controlled query. It deliberately does NOT use the normal seen-ID exclusion,
+  // because we want independent draws for measuring the search distribution.
+  async function runRandomnessDiagnostic() {
+    if (diagnosticRunning || collectionItems?.length) return;
+
+    const target = Math.max(10, Math.min(200, Number(diagnosticTarget) || 50));
+    const controller = new AbortController();
+    diagnosticAbortRef.current?.abort();
+    diagnosticAbortRef.current = controller;
+
+    setDiagnosticRunning(true);
+    setDiagnosticRows([]);
+
+    const rows = [];
+
+    try {
+      for (let i = 0; i < target; i++) {
+        if (controller.signal.aborted) break;
+
+        // Match the normal Discover defaults: Vinyl, no genre, no decade, no country.
+        const pick = await randomReleaseSearch(
+          { type: "release", format: "Vinyl" },
+          new Set(),
+          controller.signal
+        );
+
+        if (!pick) {
+          rows.push({
+            n: i + 1,
+            status: "no result",
+            title: "—",
+            genre: "—",
+            year: "—",
+            page: "—",
+            id: "—",
+          });
+          setDiagnosticRows([...rows]);
+          continue;
+        }
+
+        // Get the clean genre/year from the release detail when possible.
+        let detail = null;
+        try {
+          detail = await discogsFetchDetail(pick.resource_url, controller.signal);
+        } catch {
+          // Keep going; search result genre/year are still useful.
+        }
+
+        const genres = detail?.genres || pick.genre || [];
+        const year = detail?.year || pick.year || null;
+
+        rows.push({
+          n: i + 1,
+          status: "ok",
+          title: detail?.title || pick.title || "—",
+          genre: genres.length ? genres.join(", ") : "Unclassified",
+          year: year || "—",
+          id: pick.id,
+        });
+
+        setDiagnosticRows([...rows]);
+      }
+    } catch (e) {
+      if (e.name !== "AbortError") {
+        rows.push({
+          n: rows.length + 1,
+          status: "error",
+          title: e.message || "Diagnostic error",
+          genre: "—",
+          year: "—",
+          id: "—",
+        });
+        setDiagnosticRows([...rows]);
+      }
+    } finally {
+      if (diagnosticAbortRef.current === controller) diagnosticAbortRef.current = null;
+      setDiagnosticRunning(false);
+    }
+  }
+
+  function stopRandomnessDiagnostic() {
+    diagnosticAbortRef.current?.abort();
+    diagnosticAbortRef.current = null;
+    setDiagnosticRunning(false);
+  }
+
+  const diagnosticGenreCounts = useMemo(() => {
+    const counts = {};
+    diagnosticRows.forEach((row) => {
+      if (row.status !== "ok") return;
+      const genres = row.genre.split(",").map((g) => g.trim()).filter(Boolean);
+      if (!genres.length) genres.push("Unclassified");
+      genres.forEach((g) => {
+        counts[g] = (counts[g] || 0) + 1;
+      });
+    });
+    return Object.entries(counts).sort((a, b) => b[1] - a[1]);
+  }, [diagnosticRows]);
+
+  const diagnosticDecadeCounts = useMemo(() => {
+    const counts = {};
+    diagnosticRows.forEach((row) => {
+      const year = Number(row.year);
+      if (!Number.isFinite(year) || year < 1900) return;
+      const decade = `${Math.floor(year / 10) * 10}s`;
+      counts[decade] = (counts[decade] || 0) + 1;
+    });
+    return Object.entries(counts).sort((a, b) => Number(a[0]) - Number(b[0]));
+  }, [diagnosticRows]);
+
+  function downloadDiagnosticCSV() {
+    if (!diagnosticRows.length) return;
+    const header = ["n", "status", "title", "genre", "year", "id"];
+    const esc = (v) => `"${String(v ?? "").replaceAll('"', '""')}"`;
+    const csv = [
+      header.join(","),
+      ...diagnosticRows.map((r) => header.map((h) => esc(r[h])).join(",")),
+    ].join("\\n");
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "discogs-randomness-diagnostic.csv";
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+
   function primaryGenre() {
     return detail?.genres?.[0] || result?.genre?.[0] || null;
   }
@@ -1298,6 +1456,133 @@ function DiscoverTab({ collectionSource, collectionItems }) {
 
   return (
     <>
+      <div style={styles.diagnosticPanel}>
+        <button
+          type="button"
+          style={styles.diagnosticToggle}
+          onClick={() => setDiagnosticOpen((v) => !v)}
+        >
+          {diagnosticOpen ? "Hide randomness diagnostic" : "🧪 Randomness diagnostic"}
+        </button>
+
+        {diagnosticOpen && (
+          <div style={styles.diagnosticBody}>
+            <p style={styles.diagnosticTitle}>Temporary test — global Vinyl search</p>
+            <p style={styles.diagnosticCopy}>
+              This runs the same random page sampler as “Find something,” with
+              <strong> Vinyl + Any Genre + Any Decade</strong>. It records the actual
+              genres and years returned so we can see whether Discogs' ranking is skewing the draw.
+            </p>
+
+            {collectionItems?.length ? (
+              <p style={styles.diagnosticWarning}>
+                Disconnect the collection first. This test intentionally measures the global Discogs catalog.
+              </p>
+            ) : (
+              <>
+                <div style={styles.diagnosticControls}>
+                  <label style={styles.diagnosticLabel}>
+                    Draws
+                    <select
+                      style={styles.diagnosticSelect}
+                      value={diagnosticTarget}
+                      onChange={(e) => setDiagnosticTarget(Number(e.target.value))}
+                      disabled={diagnosticRunning}
+                    >
+                      {[10, 25, 50, 100, 200].map((n) => <option key={n} value={n}>{n}</option>)}
+                    </select>
+                  </label>
+
+                  {!diagnosticRunning ? (
+                    <button type="button" style={styles.diagnosticRun} onClick={runRandomnessDiagnostic}>
+                      Run test
+                    </button>
+                  ) : (
+                    <button type="button" style={styles.diagnosticStop} onClick={stopRandomnessDiagnostic}>
+                      Stop
+                    </button>
+                  )}
+
+                  {diagnosticRows.length > 0 && (
+                    <button type="button" style={styles.diagnosticSecondary} onClick={downloadDiagnosticCSV}>
+                      CSV
+                    </button>
+                  )}
+                </div>
+
+                {diagnosticRunning && (
+                  <p style={styles.diagnosticProgress}>
+                    Testing… {diagnosticRows.length} / {diagnosticTarget}
+                  </p>
+                )}
+
+                {diagnosticRows.length > 0 && (
+                  <>
+                    <div style={styles.diagnosticSummary}>
+                      <div>
+                        <strong>{diagnosticRows.filter((r) => r.status === "ok").length}</strong>
+                        <span> successful draws</span>
+                      </div>
+                      <div>
+                        <strong>{diagnosticGenreCounts[0]?.[1] || 0}</strong>
+                        <span> top-genre appearances</span>
+                      </div>
+                    </div>
+
+                    <div style={styles.diagnosticSection}>
+                      <h4>Genre distribution</h4>
+                      {diagnosticGenreCounts.map(([g, n]) => {
+                        const successful = diagnosticRows.filter((r) => r.status === "ok").length || 1;
+                        return (
+                          <div key={g} style={styles.diagnosticBarRow}>
+                            <span>{g}</span>
+                            <span>{n} ({((n / successful) * 100).toFixed(1)}%)</span>
+                          </div>
+                        );
+                      })}
+                    </div>
+
+                    <div style={styles.diagnosticSection}>
+                      <h4>Decade distribution</h4>
+                      {diagnosticDecadeCounts.map(([d, n]) => {
+                        const successful = diagnosticRows.filter((r) => r.status === "ok").length || 1;
+                        return (
+                          <div key={d} style={styles.diagnosticBarRow}>
+                            <span>{d}</span>
+                            <span>{n} ({((n / successful) * 100).toFixed(1)}%)</span>
+                          </div>
+                        );
+                      })}
+                    </div>
+
+                    <div style={styles.diagnosticSection}>
+                      <h4>Individual draws</h4>
+                      <div style={styles.diagnosticTableWrap}>
+                        <table style={styles.diagnosticTable}>
+                          <thead>
+                            <tr><th>#</th><th>Genre</th><th>Year</th><th>Release</th></tr>
+                          </thead>
+                          <tbody>
+                            {diagnosticRows.map((r) => (
+                              <tr key={`${r.n}-${r.id}`}>
+                                <td>{r.n}</td>
+                                <td>{r.genre}</td>
+                                <td>{r.year}</td>
+                                <td title={r.title}>{r.title}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  </>
+                )}
+              </>
+            )}
+          </div>
+        )}
+      </div>
+
       <div style={styles.form} ref={formRef}>
         <p style={styles.formHeading}>{collectionSource ? `Find me… (from ${collectionSource.username}'s collection)` : "Find me…"}</p>
 
@@ -2274,6 +2559,136 @@ const styles = {
     border: `1px dashed ${PALETTE.border}`,
     borderRadius: 10,
     padding: 18,
+  },
+
+  diagnosticPanel: {
+    marginBottom: 12,
+    border: `1px dashed ${PALETTE.borderStrong}`,
+    borderRadius: 10,
+    background: PALETTE.card,
+    overflow: "hidden",
+  },
+  diagnosticToggle: {
+    width: "100%",
+    padding: "10px 12px",
+    border: "none",
+    background: "transparent",
+    color: PALETTE.muted,
+    textAlign: "left",
+    fontSize: 12,
+    fontWeight: 700,
+    cursor: "pointer",
+  },
+  diagnosticBody: {
+    padding: "4px 14px 14px",
+    borderTop: `1px solid ${PALETTE.border}`,
+  },
+  diagnosticTitle: {
+    fontSize: 14,
+    fontWeight: 800,
+    margin: "10px 0 5px",
+  },
+  diagnosticCopy: {
+    fontSize: 12,
+    lineHeight: 1.45,
+    color: PALETTE.mutedLight,
+    marginBottom: 10,
+  },
+  diagnosticWarning: {
+    fontSize: 12,
+    color: PALETTE.warn,
+    margin: "8px 0",
+  },
+  diagnosticControls: {
+    display: "flex",
+    alignItems: "end",
+    gap: 8,
+    flexWrap: "wrap",
+  },
+  diagnosticLabel: {
+    display: "flex",
+    flexDirection: "column",
+    gap: 4,
+    fontSize: 10,
+    color: PALETTE.muted,
+    fontWeight: 700,
+    textTransform: "uppercase",
+  },
+  diagnosticSelect: {
+    padding: "7px 8px",
+    borderRadius: 6,
+    border: `1px solid ${PALETTE.border}`,
+    background: PALETTE.bg,
+    color: PALETTE.primary,
+  },
+  diagnosticRun: {
+    padding: "8px 12px",
+    borderRadius: 7,
+    border: "none",
+    background: PALETTE.accent,
+    color: "#fff",
+    fontSize: 12,
+    fontWeight: 700,
+    cursor: "pointer",
+  },
+  diagnosticStop: {
+    padding: "8px 12px",
+    borderRadius: 7,
+    border: `1px solid ${PALETTE.danger}`,
+    background: "transparent",
+    color: PALETTE.danger,
+    fontSize: 12,
+    fontWeight: 700,
+    cursor: "pointer",
+  },
+  diagnosticSecondary: {
+    padding: "8px 12px",
+    borderRadius: 7,
+    border: `1px solid ${PALETTE.border}`,
+    background: PALETTE.bg,
+    color: PALETTE.muted,
+    fontSize: 12,
+    fontWeight: 700,
+    cursor: "pointer",
+  },
+  diagnosticProgress: {
+    fontSize: 11,
+    color: PALETTE.mutedLight,
+    margin: "8px 0",
+  },
+  diagnosticSummary: {
+    display: "flex",
+    gap: 18,
+    marginTop: 10,
+    padding: "9px 10px",
+    borderRadius: 7,
+    background: PALETTE.bg,
+    fontSize: 11,
+    color: PALETTE.muted,
+  },
+  diagnosticSection: {
+    marginTop: 12,
+  },
+  diagnosticSectionH4: {},
+  diagnosticBarRow: {
+    display: "flex",
+    justifyContent: "space-between",
+    gap: 8,
+    padding: "3px 0",
+    fontSize: 11,
+    color: PALETTE.muted,
+    borderBottom: `1px solid ${PALETTE.border}`,
+  },
+  diagnosticTableWrap: {
+    maxHeight: 300,
+    overflow: "auto",
+    border: `1px solid ${PALETTE.border}`,
+    borderRadius: 7,
+  },
+  diagnosticTable: {
+    width: "100%",
+    borderCollapse: "collapse",
+    fontSize: 10.5,
   },
 
   form: {
