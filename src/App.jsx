@@ -1180,11 +1180,11 @@ function DiscoverTab({ collectionSource, collectionItems }) {
         setEmptyNotice(
           inCollectionMode
             ? (anyResultsAtAll
-                ? "Found matches in the collection, but none cleared the extra filters. Try loosening things a bit."
-                : "Nothing in this collection matched that combination. Try loosening a filter.")
+                ? "Found matches in the collection, but none cleared the extra filters. Try loosening things a bit or just try again - Discogs can get stuck trying to find stuff."
+                : "Nothing in this collection matched that combination. Try loosening a filter or just trying again.")
             : (anyResultsAtAll
-                ? "Found matches, but couldn't find one that also cleared the extra filters after several tries. Try loosening things a bit."
-                : "Nothing matched that combination. Try loosening a filter — style and country are the most restrictive.")
+                ? "Found matches, but couldn't find one that also cleared the extra filters after several tries. Try loosening things a bit or just trying again."
+                : "Nothing matched that combination. Try loosening a filter — style and country are the most restrictive. Though you might actually be able to try again and see what happens.")
         );
         setLoading(false);
         return null;
