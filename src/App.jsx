@@ -1,5 +1,4 @@
 import React, { useState, useMemo, useEffect, useCallback, useRef } from "react";
-import { LuArrowUpDown } from "react-icons/lu";
 
 // ---- Controlled vocab (mirrors Discogs' own genre/style taxonomy, trimmed to common picks) ----
 const GENRE_STYLES = {
@@ -1563,13 +1562,13 @@ function DiscoverTab({ collectionSource, collectionItems }) {
             🌀 Obscurer
           </button>
           <button style={{ ...styles.modeButton, ...(loading ? styles.modeButtonDisabled : {}) }} onClick={handleHiddenGem} disabled={loading}>
-            <LuArrowUpDown /> High Ratings, Low Haves
+            ↕️ High Ratings, Low Haves
           </button>
         </div>
       ) : (
         <div style={styles.discoveryModeRow}>
           <button style={{ ...styles.modeButton, ...(loading ? styles.modeButtonDisabled : {}) }} onClick={handleHiddenGem} disabled={loading}>
-            <LuArrowUpDown /> High Ratings, Low Haves
+            ↕️ High Ratings, Low Haves
           </button>
         </div>
       )}
