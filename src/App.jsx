@@ -708,7 +708,7 @@ export default function App() {
         {tab === "discover" && (
           <DiscoverTab collectionSource={collectionSource} collectionItems={collectionItems} />
         )}
-        {tab === "search" && <SearchTab />}
+        {tab === "search" && <SearchTab collectionSource={collectionSource} collectionItems={collectionItems} />}
         {tab === "games" && (
           <GamesTab collectionSource={collectionSource} collectionItems={collectionItems} />
         )}
@@ -1644,7 +1644,17 @@ function sortParamsFor(sortMode) {
   return {};
 }
 
-function SearchTab() {
+// Collection-scoped counterpart: when a collection is connected, Search runs entirely
+// client-side against the already-cached collection instead of hitting Discogs' global
+// search. "Best match" has no real relevance signal to sort by here, so it just keeps
+// whatever order the substring filter produced.
+function sortCollectionMatches(items, sortMode) {
+  if (sortMode === "year_desc") return [...items].sort((a, b) => (Number(b.year) || 0) - (Number(a.year) || 0));
+  if (sortMode === "year_asc") return [...items].sort((a, b) => (Number(a.year) || 0) - (Number(b.year) || 0));
+  return items;
+}
+
+function SearchTab({ collectionSource, collectionItems }) {
   const [query, setQuery] = useState("");
   const [submittedQuery, setSubmittedQuery] = useState("");
   const [releasesOnly, setReleasesOnly] = useState(true);
@@ -1665,9 +1675,32 @@ function SearchTab() {
   const requestRef = useRef(null);
   const detailRequestRef = useRef(null);
 
-  const runSearch = useCallback(async (q, pageNum, only, sort) => {
+  const runSearch = useCallback(async (q, pageNum, only, sort, source, items) => {
     if (!q.trim()) return;
     requestRef.current?.abort();
+
+    if (source) {
+      // Collection-scoped: everything's already cached, so this is just a synchronous
+      // filter + sort + slice, no network call and no "releases only" toggle to apply
+      // (collection releases are, well, always releases).
+      setLoading(true);
+      setError("");
+      const needle = q.trim().toLowerCase();
+      const matches = (items || [])
+        .map(collectionItemToPick)
+        .filter((p) => p.id)
+        .filter((p) => [p.title, ...(p.label || [])].join(" ").toLowerCase().includes(needle));
+      const sorted = sortCollectionMatches(matches, sort);
+      const perPage = SEARCH_RESULTS_PER_PAGE;
+      const totalPages = Math.max(1, Math.ceil(sorted.length / perPage));
+      const clampedPage = Math.min(Math.max(pageNum, 1), totalPages);
+      const slice = sorted.slice((clampedPage - 1) * perPage, clampedPage * perPage);
+      setResults(slice);
+      setPagination({ page: clampedPage, pages: totalPages, items: sorted.length });
+      setLoading(false);
+      return;
+    }
+
     const controller = new AbortController();
     requestRef.current = controller;
     setLoading(true);
@@ -1694,6 +1727,18 @@ function SearchTab() {
     }
   }, []);
 
+  // If the person connects (or disconnects) a collection while a search is already showing,
+  // re-run it against the new scope instead of silently leaving stale, mismatched results up.
+  const collectionKey = collectionSource?.username || null;
+  useEffect(() => {
+    if (submittedQuery) {
+      setPage(1);
+      runSearch(submittedQuery, 1, releasesOnly, sortMode, collectionSource, collectionItems);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [collectionKey]);
+
+
   function handleSubmit(e) {
     e.preventDefault();
     if (!query.trim()) return;
@@ -1701,13 +1746,13 @@ function SearchTab() {
     setSubmittedQuery(q);
     setHasSearched(true);
     setPage(1);
-    runSearch(q, 1, releasesOnly, sortMode);
+    runSearch(q, 1, releasesOnly, sortMode, collectionSource, collectionItems);
   }
 
   function changePage(next) {
     if (!submittedQuery || next < 1) return;
     setPage(next);
-    runSearch(submittedQuery, next, releasesOnly, sortMode);
+    runSearch(submittedQuery, next, releasesOnly, sortMode, collectionSource, collectionItems);
   }
 
   function handleToggleReleasesOnly() {
@@ -1715,7 +1760,7 @@ function SearchTab() {
     setReleasesOnly(next);
     if (submittedQuery) {
       setPage(1);
-      runSearch(submittedQuery, 1, next, sortMode);
+      runSearch(submittedQuery, 1, next, sortMode, collectionSource, collectionItems);
     }
   }
 
@@ -1724,7 +1769,7 @@ function SearchTab() {
     setSortMode(next);
     if (submittedQuery) {
       setPage(1);
-      runSearch(submittedQuery, 1, releasesOnly, next);
+      runSearch(submittedQuery, 1, releasesOnly, next, collectionSource, collectionItems);
     }
   }
 
@@ -1780,9 +1825,20 @@ function SearchTab() {
         </button>
       </form>
 
+      {collectionSource && (
+        <p style={styles.modeNotice}>
+          Searching within {collectionSource.username}'s collection ({collectionItems?.length ?? 0} releases).
+        </p>
+      )}
+
       <div style={styles.searchControlsRow}>
         <label style={styles.checkboxRow}>
-          <input type="checkbox" checked={releasesOnly} onChange={handleToggleReleasesOnly} />
+          <input
+            type="checkbox"
+            checked={releasesOnly}
+            onChange={handleToggleReleasesOnly}
+            disabled={!!collectionSource}
+          />
           Releases only (hide masters)
         </label>
         <select style={styles.sortSelect} value={sortMode} onChange={handleSortChange}>
@@ -1791,6 +1847,9 @@ function SearchTab() {
           ))}
         </select>
       </div>
+      {collectionSource && (
+        <p style={styles.hintText}>A connected collection only holds releases, so this filter doesn't apply.</p>
+      )}
 
       {!hasSearched && !loading && (
         <p style={styles.hintText}>Search Discogs directly — no randomization, just results.</p>
