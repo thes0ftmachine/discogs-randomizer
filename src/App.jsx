@@ -583,7 +583,7 @@ function Turntable({ size = 64 }) {
 }
 
 export default function App() {
-  const [tab, setTab] = useState("discover"); // 'discover' | 'games'
+  const [tab, setTab] = useState("discover"); // 'discover' | 'search' | 'games'
   const [collectionSource, setCollectionSource] = useState(null); // { username } | null
   const [collectionItems, setCollectionItems] = useState(null); // cached array, or null if not connected
   const [collectionLoading, setCollectionLoading] = useState(false);
@@ -681,6 +681,12 @@ export default function App() {
             Discover
           </button>
           <button
+            style={{ ...styles.tabButton, ...(tab === "search" ? styles.tabButtonActive : {}) }}
+            onClick={() => setTab("search")}
+          >
+            Search
+          </button>
+          <button
             style={{ ...styles.tabButton, ...(tab === "games" ? styles.tabButtonActive : {}) }}
             onClick={() => setTab("games")}
           >
@@ -699,9 +705,11 @@ export default function App() {
           setError={setCollectionError}
         />
 
-        {tab === "discover" ? (
+        {tab === "discover" && (
           <DiscoverTab collectionSource={collectionSource} collectionItems={collectionItems} />
-        ) : (
+        )}
+        {tab === "search" && <SearchTab />}
+        {tab === "games" && (
           <GamesTab collectionSource={collectionSource} collectionItems={collectionItems} />
         )}
       </div>
@@ -1352,14 +1360,16 @@ function DiscoverTab({ collectionSource, collectionItems }) {
         </div>
 
         <div style={styles.fieldRow}>
-          <label style={styles.label}>Country</label>
+          <label style={styles.label}>Country of release</label>
           <select style={styles.select} value={country} onChange={(e) => setCountry(e.target.value)} disabled={!!collectionSource}>
             {COUNTRIES.map((c) => (
               <option key={c} value={c}>{c}</option>
             ))}
           </select>
-          {collectionSource && (
+          {collectionSource ? (
             <p style={styles.hintText}>Discogs doesn't expose pressing country on collection data, so this filter is off while a collection is connected.</p>
+          ) : (
+            <p style={styles.hintText}>This is the country the pressing was released in — not the artist's nationality.</p>
           )}
         </div>
 
@@ -1611,6 +1621,393 @@ function DiscoverTab({ collectionSource, collectionItems }) {
   );
 }
 
+
+// ============================== SEARCH TAB ==============================
+// Straight, non-randomized Discogs search: type a query, get a page of results back. Shares
+// the same /api/discogs "search" and "release" endpoints as Discover, just without the
+// random-page sampling — page 1 of a normal query is exactly what's shown.
+
+const SEARCH_RESULTS_PER_PAGE = 20;
+
+const SORT_OPTIONS = [
+  { value: "relevance", label: "Best match" },
+  { value: "year_desc", label: "Newest first" },
+  { value: "year_asc", label: "Oldest first" },
+];
+
+// Discogs' search endpoint only sorts by one field at a time — there's no native
+// "relevance, then year" compound sort. "Best match" leaves sort unset (Discogs' own
+// relevance ranking); the year options are there for when relevance isn't what's wanted.
+function sortParamsFor(sortMode) {
+  if (sortMode === "year_desc") return { sort: "year", sort_order: "desc" };
+  if (sortMode === "year_asc") return { sort: "year", sort_order: "asc" };
+  return {};
+}
+
+function SearchTab() {
+  const [query, setQuery] = useState("");
+  const [submittedQuery, setSubmittedQuery] = useState("");
+  const [releasesOnly, setReleasesOnly] = useState(true);
+  const [sortMode, setSortMode] = useState("relevance");
+  const [page, setPage] = useState(1);
+  const [results, setResults] = useState([]);
+  const [pagination, setPagination] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+  const [hasSearched, setHasSearched] = useState(false);
+
+  const [selected, setSelected] = useState(null);
+  const [selectedDetail, setSelectedDetail] = useState(null);
+  const [selectedImageIndex, setSelectedImageIndex] = useState(0);
+  const [detailLoading, setDetailLoading] = useState(false);
+  const [detailError, setDetailError] = useState("");
+
+  const requestRef = useRef(null);
+  const detailRequestRef = useRef(null);
+
+  const runSearch = useCallback(async (q, pageNum, only, sort) => {
+    if (!q.trim()) return;
+    requestRef.current?.abort();
+    const controller = new AbortController();
+    requestRef.current = controller;
+    setLoading(true);
+    setError("");
+    try {
+      const params = {
+        q: q.trim(),
+        page: String(pageNum),
+        per_page: String(SEARCH_RESULTS_PER_PAGE),
+        ...sortParamsFor(sort),
+      };
+      if (only) params.type = "release";
+      const data = await discogsFetch(params, controller.signal);
+      if (controller.signal.aborted) return;
+      setResults(data?.results || []);
+      setPagination(data?.pagination || null);
+    } catch (e) {
+      if (e.name === "AbortError") return;
+      setError(e.message || "That search didn't go through. Try again.");
+      setResults([]);
+      setPagination(null);
+    } finally {
+      if (!controller.signal.aborted) setLoading(false);
+    }
+  }, []);
+
+  function handleSubmit(e) {
+    e.preventDefault();
+    if (!query.trim()) return;
+    const q = query.trim();
+    setSubmittedQuery(q);
+    setHasSearched(true);
+    setPage(1);
+    runSearch(q, 1, releasesOnly, sortMode);
+  }
+
+  function changePage(next) {
+    if (!submittedQuery || next < 1) return;
+    setPage(next);
+    runSearch(submittedQuery, next, releasesOnly, sortMode);
+  }
+
+  function handleToggleReleasesOnly() {
+    const next = !releasesOnly;
+    setReleasesOnly(next);
+    if (submittedQuery) {
+      setPage(1);
+      runSearch(submittedQuery, 1, next, sortMode);
+    }
+  }
+
+  function handleSortChange(e) {
+    const next = e.target.value;
+    setSortMode(next);
+    if (submittedQuery) {
+      setPage(1);
+      runSearch(submittedQuery, 1, releasesOnly, next);
+    }
+  }
+
+  function openResult(r) {
+    setSelected(r);
+    setSelectedDetail(null);
+    setSelectedImageIndex(0);
+    setDetailError("");
+    detailRequestRef.current?.abort();
+    if (r.type === "master") {
+      // Masters have no per-pressing detail (community stats, marketplace price, extra
+      // images) to fetch — the search result already has everything we can show.
+      setDetailLoading(false);
+      return;
+    }
+    const controller = new AbortController();
+    detailRequestRef.current = controller;
+    setDetailLoading(true);
+    discogsFetchDetail(r.resource_url, controller.signal)
+      .then((detail) => {
+        if (controller.signal.aborted) return;
+        setSelectedDetail(detail);
+        setDetailLoading(false);
+      })
+      .catch((e) => {
+        if (e.name === "AbortError") return;
+        setDetailError(e.message || "Couldn't load the full details for that release.");
+        setDetailLoading(false);
+      });
+  }
+
+  function closeModal() {
+    detailRequestRef.current?.abort();
+    setSelected(null);
+    setSelectedDetail(null);
+    setDetailError("");
+  }
+
+  const totalPages = pagination?.pages || 1;
+
+  return (
+    <>
+      <form style={styles.searchBar} onSubmit={handleSubmit}>
+        <input
+          style={styles.searchInput}
+          type="text"
+          placeholder="Search artist, title, label, catalog #…"
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+        />
+        <button type="submit" style={styles.searchButton} disabled={loading || !query.trim()}>
+          {loading ? "Searching…" : "Search"}
+        </button>
+      </form>
+
+      <div style={styles.searchControlsRow}>
+        <label style={styles.checkboxRow}>
+          <input type="checkbox" checked={releasesOnly} onChange={handleToggleReleasesOnly} />
+          Releases only (hide masters)
+        </label>
+        <select style={styles.sortSelect} value={sortMode} onChange={handleSortChange}>
+          {SORT_OPTIONS.map((o) => (
+            <option key={o.value} value={o.value}>{o.label}</option>
+          ))}
+        </select>
+      </div>
+
+      {!hasSearched && !loading && (
+        <p style={styles.hintText}>Search Discogs directly — no randomization, just results.</p>
+      )}
+
+      {loading && (
+        <div style={styles.digBox}>
+          <span style={styles.digSpinner} aria-hidden="true" />
+          <span>Searching…</span>
+        </div>
+      )}
+
+      {!loading && error && <div style={styles.errorBox}>{error}</div>}
+
+      {!loading && hasSearched && !error && results.length === 0 && (
+        <div style={styles.emptyBox}>Nothing matched that search. Try a broader term, or turn off "Releases only."</div>
+      )}
+
+      {!loading && results.length > 0 && (
+        <>
+          <div style={styles.searchGrid} className="discovery-stagger">
+            {results.map((r) => {
+              const { artist, title } = splitArtistTitle(r, null);
+              const tags = (r.style?.length ? r.style : r.genre) || [];
+              return (
+                <button
+                  type="button"
+                  key={`${r.type || "release"}-${r.id}`}
+                  style={styles.searchCard}
+                  onClick={() => openResult(r)}
+                >
+                  <SmartImage
+                    src={r.cover_image}
+                    alt={title || r.title}
+                    style={styles.searchCardCover}
+                    placeholderStyle={styles.coverPlaceholder}
+                  />
+                  <div style={styles.searchCardBody}>
+                    <p style={styles.searchCardTitle}>{title || r.title}</p>
+                    {artist && <p style={styles.searchCardArtist}>{artist}</p>}
+                    <p style={styles.searchCardMeta}>
+                      {[r.year, r.format?.[0]].filter(Boolean).join(" · ")}
+                    </p>
+                    {tags.length > 0 && (
+                      <div style={styles.searchTagRow}>
+                        {tags.slice(0, 2).map((t) => (
+                          <span style={styles.searchTag} key={t}>{t}</span>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+
+          <div style={styles.paginationRow}>
+            <button
+              type="button"
+              style={{ ...styles.paginationButton, ...(page <= 1 ? styles.paginationButtonDisabled : {}) }}
+              onClick={() => changePage(page - 1)}
+              disabled={loading || page <= 1}
+            >
+              ← Prev
+            </button>
+            <span style={styles.pageIndicator}>Page {page} of {totalPages}</span>
+            <button
+              type="button"
+              style={{ ...styles.paginationButton, ...(page >= totalPages ? styles.paginationButtonDisabled : {}) }}
+              onClick={() => changePage(page + 1)}
+              disabled={loading || page >= totalPages}
+            >
+              Next →
+            </button>
+          </div>
+        </>
+      )}
+
+      {selected && (
+        <SearchResultModal
+          result={selected}
+          detail={selectedDetail}
+          loading={detailLoading}
+          error={detailError}
+          imageIndex={selectedImageIndex}
+          setImageIndex={setSelectedImageIndex}
+          onClose={closeModal}
+        />
+      )}
+    </>
+  );
+}
+
+function SearchResultModal({ result, detail, loading, error, imageIndex, setImageIndex, onClose }) {
+  const isMaster = result.type === "master";
+  const images = detail?.images || [];
+  const coverSrc = images[imageIndex]?.uri || images[imageIndex]?.uri150 || result.cover_image || null;
+  const { artist, title } = splitArtistTitle(result, detail);
+  const releaseUrl = "https://www.discogs.com" + (result.uri || "");
+  const ratingInfo = detail?.community?.rating;
+
+  return (
+    <div style={styles.modalOverlay} onClick={onClose}>
+      <div style={styles.modalCard} onClick={(e) => e.stopPropagation()}>
+        <button type="button" style={styles.modalClose} onClick={onClose} aria-label="Close">✕</button>
+
+        <div style={styles.coverWrap}>
+          <a href={releaseUrl} target="_blank" rel="noreferrer" style={styles.coverLink} aria-label={`View ${title} on Discogs`}>
+            <SmartImage
+              src={coverSrc}
+              alt={title}
+              style={styles.modalCover}
+              placeholderStyle={styles.coverPlaceholder}
+            />
+          </a>
+          {images.length > 1 && (
+            <>
+              <button
+                type="button"
+                aria-label="Previous image"
+                style={{ ...styles.imageArrow, left: 8 }}
+                onClick={() => setImageIndex((i) => (i - 1 + images.length) % images.length)}
+              >
+                ‹
+              </button>
+              <button
+                type="button"
+                aria-label="Next image"
+                style={{ ...styles.imageArrow, right: 8 }}
+                onClick={() => setImageIndex((i) => (i + 1) % images.length)}
+              >
+                ›
+              </button>
+              <span style={styles.imageDots}>{imageIndex + 1} / {images.length}</span>
+            </>
+          )}
+        </div>
+
+        <div style={styles.modalBody}>
+          <h2 style={styles.cardTitle}>{title}</h2>
+          {artist && <p style={styles.cardArtist}>{artist}</p>}
+
+          {isMaster && (
+            <p style={styles.modeNotice}>
+              This is a master release, grouping several pressings — open it on Discogs to see individual versions.
+            </p>
+          )}
+
+          {(detail?.genres || result.genre || []).length > 0 && (
+            <div style={styles.metaRow}>
+              {(detail?.genres || result.genre).map((g) => (
+                <span style={styles.genreTag} key={g}>{g}</span>
+              ))}
+            </div>
+          )}
+          {(detail?.styles || result.style || []).length > 0 && (
+            <div style={styles.styleChipRow}>
+              {(detail?.styles || result.style).map((s) => (
+                <span style={styles.tag} key={s}>{s}</span>
+              ))}
+            </div>
+          )}
+
+          {loading && (
+            <div style={styles.digBox}>
+              <span style={styles.digSpinner} aria-hidden="true" />
+              <span>Loading details…</span>
+            </div>
+          )}
+          {!loading && error && <div style={styles.errorBox}>{error}</div>}
+
+          {!loading && !error && (
+            <>
+              {ratingInfo && ratingInfo.count > 0 && (
+                <p style={styles.metaLine}>
+                  <span style={styles.stars}>{renderStars(ratingInfo.average)}</span>{" "}
+                  <span style={styles.hintText}>{ratingInfo.average.toFixed(2)} ({ratingInfo.count} ratings)</span>
+                </p>
+              )}
+              {detail?.community && (
+                <p style={styles.metaLine}>
+                  ❤ {detail.community.have ?? 0} have it &nbsp;·&nbsp; ☆ {detail.community.want ?? 0} want it
+                </p>
+              )}
+              {(detail?.lowest_price != null || detail?.num_for_sale != null) && (
+                <p style={styles.metaLine}>
+                  <strong>Marketplace:</strong>{" "}
+                  {detail?.lowest_price != null ? `from $${detail.lowest_price.toFixed(2)}` : "no active listings"}
+                  {detail?.num_for_sale != null ? ` · ${detail.num_for_sale} for sale` : ""}
+                </p>
+              )}
+              {((detail?.labels && detail.labels.length > 0) || (result.label && result.label.length > 0)) && (
+                <p style={styles.metaLine}>
+                  <strong>Label:</strong> {(detail?.labels?.map((l) => l.name) || result.label).join(", ")}
+                </p>
+              )}
+              {(detail?.labels?.[0]?.catno || result.catno) && (
+                <p style={styles.metaLine}>
+                  <strong>Catalog #:</strong> {detail?.labels?.[0]?.catno || result.catno}
+                </p>
+              )}
+              <p style={styles.cardSubline}>
+                {[detail?.year || result.year, detail?.country || result.country, result.format?.[0]]
+                  .filter(Boolean)
+                  .join(" · ")}
+              </p>
+            </>
+          )}
+
+          <a href={releaseUrl} target="_blank" rel="noreferrer" style={styles.link}>
+            View on Discogs →
+          </a>
+        </div>
+      </div>
+    </div>
+  );
+}
 
 // ============================== GAMES TAB ==============================
 
@@ -2609,4 +3006,144 @@ const styles = {
     fontWeight: 600,
     cursor: "pointer",
   },
+
+  searchBar: { display: "flex", gap: 8, marginBottom: 12 },
+  searchInput: {
+    flex: 1,
+    padding: "10px 12px",
+    borderRadius: 8,
+    border: `1px solid ${PALETTE.border}`,
+    background: PALETTE.card,
+    color: PALETTE.primary,
+    fontSize: 14,
+  },
+  searchButton: {
+    padding: "10px 16px",
+    borderRadius: 8,
+    border: "none",
+    background: PALETTE.accent,
+    color: "#fff",
+    fontSize: 14,
+    fontWeight: 700,
+    cursor: "pointer",
+  },
+  searchControlsRow: {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    flexWrap: "wrap",
+    gap: 10,
+    marginBottom: 16,
+  },
+  sortSelect: {
+    padding: "8px 10px",
+    borderRadius: 8,
+    border: `1px solid ${PALETTE.border}`,
+    background: PALETTE.card,
+    color: PALETTE.muted,
+    fontSize: 13,
+  },
+  searchGrid: {
+    display: "grid",
+    gridTemplateColumns: "repeat(2, 1fr)",
+    gap: 12,
+    marginTop: 4,
+  },
+  searchCard: {
+    textAlign: "left",
+    background: PALETTE.card,
+    border: `1px solid ${PALETTE.border}`,
+    borderRadius: 12,
+    overflow: "hidden",
+    cursor: "pointer",
+    padding: 0,
+    display: "flex",
+    flexDirection: "column",
+    font: "inherit",
+    color: "inherit",
+  },
+  searchCardCover: { width: "100%", aspectRatio: "1 / 1", objectFit: "cover", background: PALETTE.border, display: "block" },
+  searchCardBody: { padding: "10px 12px 12px" },
+  searchCardTitle: {
+    fontSize: 13.5,
+    fontWeight: 700,
+    margin: "0 0 2px",
+    lineHeight: 1.25,
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+    display: "-webkit-box",
+    WebkitLineClamp: 2,
+    WebkitBoxOrient: "vertical",
+  },
+  searchCardArtist: {
+    fontSize: 12.5,
+    fontWeight: 600,
+    color: PALETTE.accentDark,
+    margin: "0 0 4px",
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+    whiteSpace: "nowrap",
+  },
+  searchCardMeta: { fontSize: 11.5, color: PALETTE.muted, margin: "0 0 6px" },
+  searchTagRow: { display: "flex", flexWrap: "wrap", gap: 4 },
+  searchTag: {
+    fontSize: 10.5,
+    fontWeight: 600,
+    background: PALETTE.bg,
+    border: `1px solid ${PALETTE.border}`,
+    padding: "2px 7px",
+    borderRadius: 999,
+    color: PALETTE.muted,
+  },
+  paginationRow: { display: "flex", alignItems: "center", justifyContent: "center", gap: 14, marginTop: 18 },
+  paginationButton: {
+    padding: "8px 14px",
+    borderRadius: 8,
+    border: `1px solid ${PALETTE.border}`,
+    background: PALETTE.card,
+    color: PALETTE.primary,
+    fontSize: 13,
+    fontWeight: 600,
+    cursor: "pointer",
+  },
+  paginationButtonDisabled: { opacity: 0.4, cursor: "default" },
+  pageIndicator: { fontSize: 13, color: PALETTE.muted },
+
+  modalOverlay: {
+    position: "fixed",
+    inset: 0,
+    background: "rgba(0,0,0,0.6)",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    padding: 16,
+    zIndex: 50,
+  },
+  modalCard: {
+    position: "relative",
+    background: PALETTE.card,
+    border: `1px solid ${PALETTE.border}`,
+    borderRadius: 12,
+    maxWidth: 420,
+    width: "100%",
+    maxHeight: "88vh",
+    overflowY: "auto",
+    animation: "discoveryCardReveal 0.3s cubic-bezier(0.16, 1, 0.3, 1)",
+  },
+  modalClose: {
+    position: "absolute",
+    top: 10,
+    right: 10,
+    zIndex: 2,
+    width: 28,
+    height: 28,
+    borderRadius: "50%",
+    border: "none",
+    background: "rgba(0,0,0,0.55)",
+    color: "#fff",
+    fontSize: 14,
+    cursor: "pointer",
+  },
+  modalCover: { width: "100%", aspectRatio: "1 / 1", objectFit: "cover", background: PALETTE.border, display: "block" },
+  modalBody: { padding: "18px 20px 20px" },
 };
