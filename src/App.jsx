@@ -1631,16 +1631,19 @@ const SEARCH_RESULTS_PER_PAGE = 20;
 
 const SORT_OPTIONS = [
   { value: "relevance", label: "Best match" },
+  { value: "artist_asc", label: "Artist A–Z" },
   { value: "year_desc", label: "Newest first" },
   { value: "year_asc", label: "Oldest first" },
 ];
 
 // Discogs' search endpoint only sorts by one field at a time — there's no native
 // "relevance, then year" compound sort. "Best match" leaves sort unset (Discogs' own
-// relevance ranking); the year options are there for when relevance isn't what's wanted.
+// relevance ranking); the other options are there for when relevance isn't what's wanted —
+// "Artist A–Z" in particular is the natural order for browsing rather than searching.
 function sortParamsFor(sortMode) {
   if (sortMode === "year_desc") return { sort: "year", sort_order: "desc" };
   if (sortMode === "year_asc") return { sort: "year", sort_order: "asc" };
+  if (sortMode === "artist_asc") return { sort: "artist", sort_order: "asc" };
   return {};
 }
 
@@ -1651,6 +1654,7 @@ function sortParamsFor(sortMode) {
 function sortCollectionMatches(items, sortMode) {
   if (sortMode === "year_desc") return [...items].sort((a, b) => (Number(b.year) || 0) - (Number(a.year) || 0));
   if (sortMode === "year_asc") return [...items].sort((a, b) => (Number(a.year) || 0) - (Number(b.year) || 0));
+  if (sortMode === "artist_asc") return [...items].sort((a, b) => (a.title || "").localeCompare(b.title || ""));
   return items;
 }
 
@@ -1676,13 +1680,14 @@ function SearchTab({ collectionSource, collectionItems }) {
   const detailRequestRef = useRef(null);
 
   const runSearch = useCallback(async (q, pageNum, only, sort, source, items) => {
-    if (!q.trim()) return;
+    if (!q.trim() && !source) return; // a blank query is only valid in collection-browse mode
     requestRef.current?.abort();
 
     if (source) {
       // Collection-scoped: everything's already cached, so this is just a synchronous
       // filter + sort + slice, no network call and no "releases only" toggle to apply
-      // (collection releases are, well, always releases).
+      // (collection releases are, well, always releases). A blank query matches everything,
+      // which is what makes this double as a browse-the-whole-collection mode.
       setLoading(true);
       setError("");
       const needle = q.trim().toLowerCase();
@@ -1729,20 +1734,27 @@ function SearchTab({ collectionSource, collectionItems }) {
 
   // If the person connects (or disconnects) a collection while a search is already showing,
   // re-run it against the new scope instead of silently leaving stale, mismatched results up.
+  // Disconnecting mid-browse (blank query, no collection left to browse) has nothing left to
+  // scope to, so that case resets back to the empty/unsearched state instead.
   const collectionKey = collectionSource?.username || null;
   useEffect(() => {
-    if (submittedQuery) {
-      setPage(1);
-      runSearch(submittedQuery, 1, releasesOnly, sortMode, collectionSource, collectionItems);
+    if (!hasSearched) return;
+    if (!submittedQuery.trim() && !collectionSource) {
+      setHasSearched(false);
+      setResults([]);
+      setPagination(null);
+      return;
     }
+    setPage(1);
+    runSearch(submittedQuery, 1, releasesOnly, sortMode, collectionSource, collectionItems);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [collectionKey]);
 
 
   function handleSubmit(e) {
     e.preventDefault();
-    if (!query.trim()) return;
     const q = query.trim();
+    if (!q && !collectionSource) return; // nothing to search, and no collection to browse
     setSubmittedQuery(q);
     setHasSearched(true);
     setPage(1);
@@ -1750,7 +1762,7 @@ function SearchTab({ collectionSource, collectionItems }) {
   }
 
   function changePage(next) {
-    if (!submittedQuery || next < 1) return;
+    if (!hasSearched || next < 1) return;
     setPage(next);
     runSearch(submittedQuery, next, releasesOnly, sortMode, collectionSource, collectionItems);
   }
@@ -1758,7 +1770,7 @@ function SearchTab({ collectionSource, collectionItems }) {
   function handleToggleReleasesOnly() {
     const next = !releasesOnly;
     setReleasesOnly(next);
-    if (submittedQuery) {
+    if (hasSearched) {
       setPage(1);
       runSearch(submittedQuery, 1, next, sortMode, collectionSource, collectionItems);
     }
@@ -1767,7 +1779,7 @@ function SearchTab({ collectionSource, collectionItems }) {
   function handleSortChange(e) {
     const next = e.target.value;
     setSortMode(next);
-    if (submittedQuery) {
+    if (hasSearched) {
       setPage(1);
       runSearch(submittedQuery, 1, releasesOnly, next, collectionSource, collectionItems);
     }
@@ -1816,18 +1828,26 @@ function SearchTab({ collectionSource, collectionItems }) {
         <input
           style={styles.searchInput}
           type="text"
-          placeholder="Search artist, title, label, catalog #…"
+          placeholder={
+            collectionSource
+              ? "Search, or leave blank to browse the whole collection…"
+              : "Search artist, title, label, catalog #…"
+          }
           value={query}
           onChange={(e) => setQuery(e.target.value)}
         />
-        <button type="submit" style={styles.searchButton} disabled={loading || !query.trim()}>
-          {loading ? "Searching…" : "Search"}
+        <button
+          type="submit"
+          style={styles.searchButton}
+          disabled={loading || (!query.trim() && !collectionSource)}
+        >
+          {loading ? "Loading…" : query.trim() ? "Search" : "Browse all"}
         </button>
       </form>
 
       {collectionSource && (
         <p style={styles.modeNotice}>
-          Searching within {collectionSource.username}'s collection ({collectionItems?.length ?? 0} releases).
+          {hasSearched && !submittedQuery.trim() ? "Browsing" : "Searching within"} {collectionSource.username}'s collection ({collectionItems?.length ?? 0} releases).
         </p>
       )}
 
@@ -1852,20 +1872,28 @@ function SearchTab({ collectionSource, collectionItems }) {
       )}
 
       {!hasSearched && !loading && (
-        <p style={styles.hintText}>Search Discogs directly — no randomization, just results.</p>
+        <p style={styles.hintText}>
+          {collectionSource
+            ? "Type something to search, or hit Browse all to page through the whole collection."
+            : "Search Discogs directly — no randomization, just results."}
+        </p>
       )}
 
       {loading && (
         <div style={styles.digBox}>
           <span style={styles.digSpinner} aria-hidden="true" />
-          <span>Searching…</span>
+          <span>{query.trim() ? "Searching…" : "Loading…"}</span>
         </div>
       )}
 
       {!loading && error && <div style={styles.errorBox}>{error}</div>}
 
       {!loading && hasSearched && !error && results.length === 0 && (
-        <div style={styles.emptyBox}>Nothing matched that search. Try a broader term, or turn off "Releases only."</div>
+        <div style={styles.emptyBox}>
+          {collectionSource
+            ? "Nothing in the collection matched that."
+            : 'Nothing matched that search. Try a broader term, or turn off "Releases only."'}
+        </div>
       )}
 
       {!loading && results.length > 0 && (
