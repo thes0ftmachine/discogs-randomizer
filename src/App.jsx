@@ -4,15 +4,21 @@ import React, { useState, useMemo, useEffect, useCallback, useRef } from "react"
 const GENRE_STYLES = {
   "Any Genre": [],
 "Blues": [
-    "Chicago Blues",
-  "Country Blues",
-    "Delta Blues",
-    "Electric Blues",
-  "Hill Country Blues",
-   "Louisiana Blues",
-  "Memphis Blues",
-  "Modern Electric Blues",
-  "Texas Blues"
+"Boogie Woogie",
+"Chicago Blues",
+"Country Blues",
+"Delta Blues",
+"East Coast Blues",
+"Electric Blues",
+"Harmonica Blues",
+"Hill Country Blues",
+"Jump Blues",
+"Louisiana Blues",
+"Memphis Blues",
+"Modern Electric Blues",
+"Piano Blues",
+"Piedmont Blues",
+"Texas Blues"
   
   ],
   "Classical": [
@@ -1629,6 +1635,10 @@ function DiscoverTab({ collectionSource, collectionItems }) {
 
 const SEARCH_RESULTS_PER_PAGE = 20;
 
+// Search's format filter is single-select (unlike Discover's multi-select chips) to keep the
+// filter row compact — "Any Format" stands in for no filter.
+const SEARCH_FORMAT_OPTIONS = ["Any Format", ...FORMAT_OPTIONS];
+
 const SORT_OPTIONS = [
   { value: "relevance", label: "Best match" },
   { value: "artist_asc", label: "Artist A–Z" },
@@ -1658,11 +1668,21 @@ function sortCollectionMatches(items, sortMode) {
   return items;
 }
 
+// A blank query is normally not searchable — but a genre/style/format filter on its own is
+// a valid "browse the catalog by filter" request, same idea as Discover's filters minus the
+// randomization. Collection-connected browsing (no filters needed) is handled separately.
+function isAnyFilterActive(f) {
+  return (f.genre && f.genre !== "Any Genre") || !!f.style || (f.format && f.format !== "Any Format");
+}
+
 function SearchTab({ collectionSource, collectionItems }) {
   const [query, setQuery] = useState("");
   const [submittedQuery, setSubmittedQuery] = useState("");
   const [releasesOnly, setReleasesOnly] = useState(true);
   const [sortMode, setSortMode] = useState("relevance");
+  const [filterGenre, setFilterGenre] = useState("Any Genre");
+  const [filterStyle, setFilterStyle] = useState("");
+  const [filterFormat, setFilterFormat] = useState("Any Format");
   const [page, setPage] = useState(1);
   const [results, setResults] = useState([]);
   const [pagination, setPagination] = useState(null);
@@ -1678,9 +1698,12 @@ function SearchTab({ collectionSource, collectionItems }) {
 
   const requestRef = useRef(null);
   const detailRequestRef = useRef(null);
+  const filterStyleOptions = useMemo(() => GENRE_STYLES[filterGenre] || [], [filterGenre]);
 
-  const runSearch = useCallback(async (q, pageNum, only, sort, source, items) => {
-    if (!q.trim() && !source) return; // a blank query is only valid in collection-browse mode
+  const runSearch = useCallback(async (q, pageNum, only, sort, source, items, filters) => {
+    // A blank query is only valid when there's something else doing the narrowing — a
+    // connected collection to browse, or a genre/style/format filter set.
+    if (!q.trim() && !source && !isAnyFilterActive(filters)) return;
     requestRef.current?.abort();
 
     if (source) {
@@ -1694,7 +1717,15 @@ function SearchTab({ collectionSource, collectionItems }) {
       const matches = (items || [])
         .map(collectionItemToPick)
         .filter((p) => p.id)
-        .filter((p) => [p.title, ...(p.label || [])].join(" ").toLowerCase().includes(needle));
+        .filter((p) => [p.title, ...(p.label || [])].join(" ").toLowerCase().includes(needle))
+        .filter((p) =>
+          collectionPickMatchesFilters(p, {
+            genre: filters.genre,
+            style: filters.style,
+            decade: "Any Decade",
+            formats: filters.format && filters.format !== "Any Format" ? [filters.format] : [],
+          })
+        );
       const sorted = sortCollectionMatches(matches, sort);
       const perPage = SEARCH_RESULTS_PER_PAGE;
       const totalPages = Math.max(1, Math.ceil(sorted.length / perPage));
@@ -1712,12 +1743,18 @@ function SearchTab({ collectionSource, collectionItems }) {
     setError("");
     try {
       const params = {
-        q: q.trim(),
         page: String(pageNum),
         per_page: String(SEARCH_RESULTS_PER_PAGE),
         ...sortParamsFor(sort),
       };
+      // Discogs' search treats an empty q as a literal (and mostly fruitless) filter rather
+      // than "no text filter" — only send it when there's actually something to search for,
+      // same as Discover never sends q at all for its filter-only queries.
+      if (q.trim()) params.q = q.trim();
       if (only) params.type = "release";
+      if (filters.genre && filters.genre !== "Any Genre") params.genre = filters.genre;
+      if (filters.style) params.style = filters.style;
+      if (filters.format && filters.format !== "Any Format") params.format = filters.format;
       const data = await discogsFetch(params, controller.signal);
       if (controller.signal.aborted) return;
       setResults(data?.results || []);
@@ -1737,16 +1774,18 @@ function SearchTab({ collectionSource, collectionItems }) {
   // Disconnecting mid-browse (blank query, no collection left to browse) has nothing left to
   // scope to, so that case resets back to the empty/unsearched state instead.
   const collectionKey = collectionSource?.username || null;
+  const currentFilters = () => ({ genre: filterGenre, style: filterStyle, format: filterFormat });
+
   useEffect(() => {
     if (!hasSearched) return;
-    if (!submittedQuery.trim() && !collectionSource) {
+    if (!submittedQuery.trim() && !collectionSource && !isAnyFilterActive(currentFilters())) {
       setHasSearched(false);
       setResults([]);
       setPagination(null);
       return;
     }
     setPage(1);
-    runSearch(submittedQuery, 1, releasesOnly, sortMode, collectionSource, collectionItems);
+    runSearch(submittedQuery, 1, releasesOnly, sortMode, collectionSource, collectionItems, currentFilters());
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [collectionKey]);
 
@@ -1754,17 +1793,18 @@ function SearchTab({ collectionSource, collectionItems }) {
   function handleSubmit(e) {
     e.preventDefault();
     const q = query.trim();
-    if (!q && !collectionSource) return; // nothing to search, and no collection to browse
+    const filters = currentFilters();
+    if (!q && !collectionSource && !isAnyFilterActive(filters)) return; // nothing to search or browse by
     setSubmittedQuery(q);
     setHasSearched(true);
     setPage(1);
-    runSearch(q, 1, releasesOnly, sortMode, collectionSource, collectionItems);
+    runSearch(q, 1, releasesOnly, sortMode, collectionSource, collectionItems, filters);
   }
 
   function changePage(next) {
     if (!hasSearched || next < 1) return;
     setPage(next);
-    runSearch(submittedQuery, next, releasesOnly, sortMode, collectionSource, collectionItems);
+    runSearch(submittedQuery, next, releasesOnly, sortMode, collectionSource, collectionItems, currentFilters());
   }
 
   function handleToggleReleasesOnly() {
@@ -1772,7 +1812,7 @@ function SearchTab({ collectionSource, collectionItems }) {
     setReleasesOnly(next);
     if (hasSearched) {
       setPage(1);
-      runSearch(submittedQuery, 1, next, sortMode, collectionSource, collectionItems);
+      runSearch(submittedQuery, 1, next, sortMode, collectionSource, collectionItems, currentFilters());
     }
   }
 
@@ -1781,7 +1821,47 @@ function SearchTab({ collectionSource, collectionItems }) {
     setSortMode(next);
     if (hasSearched) {
       setPage(1);
-      runSearch(submittedQuery, 1, releasesOnly, next, collectionSource, collectionItems);
+      runSearch(submittedQuery, 1, releasesOnly, next, collectionSource, collectionItems, currentFilters());
+    }
+  }
+
+  function handleGenreChange(e) {
+    const nextGenre = e.target.value;
+    setFilterGenre(nextGenre);
+    setFilterStyle(""); // style options depend on genre — a stale style could otherwise filter out everything
+    if (hasSearched) {
+      setPage(1);
+      runSearch(submittedQuery, 1, releasesOnly, sortMode, collectionSource, collectionItems, {
+        genre: nextGenre,
+        style: "",
+        format: filterFormat,
+      });
+    }
+  }
+
+  function handleStyleChange(e) {
+    const nextStyle = e.target.value;
+    setFilterStyle(nextStyle);
+    if (hasSearched) {
+      setPage(1);
+      runSearch(submittedQuery, 1, releasesOnly, sortMode, collectionSource, collectionItems, {
+        genre: filterGenre,
+        style: nextStyle,
+        format: filterFormat,
+      });
+    }
+  }
+
+  function handleFormatChange(e) {
+    const nextFormat = e.target.value;
+    setFilterFormat(nextFormat);
+    if (hasSearched) {
+      setPage(1);
+      runSearch(submittedQuery, 1, releasesOnly, sortMode, collectionSource, collectionItems, {
+        genre: filterGenre,
+        style: filterStyle,
+        format: nextFormat,
+      });
     }
   }
 
@@ -1821,6 +1901,7 @@ function SearchTab({ collectionSource, collectionItems }) {
   }
 
   const totalPages = pagination?.pages || 1;
+  const filtersActive = isAnyFilterActive({ genre: filterGenre, style: filterStyle, format: filterFormat });
 
   return (
     <>
@@ -1831,7 +1912,7 @@ function SearchTab({ collectionSource, collectionItems }) {
           placeholder={
             collectionSource
               ? "Search, or leave blank to browse the whole collection…"
-              : "Search artist, title, label, catalog #…"
+              : "Search, or set a filter below and leave blank to browse…"
           }
           value={query}
           onChange={(e) => setQuery(e.target.value)}
@@ -1839,11 +1920,43 @@ function SearchTab({ collectionSource, collectionItems }) {
         <button
           type="submit"
           style={styles.searchButton}
-          disabled={loading || (!query.trim() && !collectionSource)}
+          disabled={loading || (!query.trim() && !collectionSource && !filtersActive)}
         >
           {loading ? "Loading…" : query.trim() ? "Search" : "Browse all"}
         </button>
       </form>
+
+      <div style={styles.searchFilterChipRow}>
+        <select
+          style={{ ...styles.searchFilterChip, ...(filterGenre !== "Any Genre" ? styles.searchFilterChipActive : {}) }}
+          value={filterGenre}
+          onChange={handleGenreChange}
+        >
+          {Object.keys(GENRE_STYLES).map((g) => (
+            <option key={g} value={g}>{g}</option>
+          ))}
+        </select>
+        <select
+          style={{ ...styles.searchFilterChip, ...(filterStyle ? styles.searchFilterChipActive : {}) }}
+          value={filterStyle}
+          onChange={handleStyleChange}
+          disabled={filterStyleOptions.length === 0}
+        >
+          <option value="">Any Style</option>
+          {filterStyleOptions.map((s) => (
+            <option key={s} value={s}>{s}</option>
+          ))}
+        </select>
+        <select
+          style={{ ...styles.searchFilterChip, ...(filterFormat !== "Any Format" ? styles.searchFilterChipActive : {}) }}
+          value={filterFormat}
+          onChange={handleFormatChange}
+        >
+          {SEARCH_FORMAT_OPTIONS.map((f) => (
+            <option key={f} value={f}>{f}</option>
+          ))}
+        </select>
+      </div>
 
       {collectionSource && (
         <p style={styles.modeNotice}>
@@ -1875,7 +1988,7 @@ function SearchTab({ collectionSource, collectionItems }) {
         <p style={styles.hintText}>
           {collectionSource
             ? "Type something to search, or hit Browse all to page through the whole collection."
-            : "Search Discogs directly — no randomization, just results."}
+            : "Search Discogs directly, or set a genre/style/format filter and hit Browse all to page through matches with no text search."}
         </p>
       )}
 
@@ -3114,6 +3227,18 @@ const styles = {
     fontWeight: 700,
     cursor: "pointer",
   },
+  searchFilterChipRow: { display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 12 },
+  searchFilterChip: {
+    fontSize: 12,
+    fontWeight: 600,
+    background: PALETTE.card,
+    border: `1px solid ${PALETTE.border}`,
+    padding: "6px 10px",
+    borderRadius: 999,
+    color: PALETTE.muted,
+    maxWidth: 140,
+  },
+  searchFilterChipActive: { background: PALETTE.accent, color: "#fff", borderColor: PALETTE.accent },
   searchControlsRow: {
     display: "flex",
     alignItems: "center",
