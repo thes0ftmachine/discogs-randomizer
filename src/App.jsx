@@ -91,7 +91,7 @@ const GENRE_STYLES = {
 "Vaporwave"
   ],
   "Folk, World, & Country": [
-"African,"
+"African",
 "Afrobeat",
 "Bluegrass",
 "Cajun",
