@@ -138,12 +138,26 @@ const GENRE_STYLES = {
 "UK Street Soul"
   ],
   "Hip Hop": [
-    "Boom Bap",
-    "Conscious",
-    "G-Funk",
-    "Gangsta",
-    "Instrumental",
-    "Trip Hop"
+"Boom Bap",
+"Cloud Rap",
+"Conscious",
+"Crunk",
+"Cut-up/DJ",
+"Drill",
+"G-Funk",
+"Gangsta",
+"Glitch Hop",
+"Grime",
+"Hardcore Hip-Hop",
+"Horrorcore",
+"Instrumental",
+"Jazzy Hip-Hop",
+"Phonk",
+"Pop Rap",
+"Ragga HipHop",
+"Thug Rap",
+"Trap",
+"Trip Hop"
   ],
   "Jazz": [
 "Acid Jazz",
