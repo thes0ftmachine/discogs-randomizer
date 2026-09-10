@@ -356,11 +356,19 @@ const COUNTRIES = [
 // more than one, we broaden the query and filter candidates client-side instead.
 const FORMAT_OPTIONS = ["Vinyl", "LP", "CD", "Cassette", "7\"", "10\"", "12\"", "Box Set"];
 
-// A release is physically one of these, never more than one at once — unlike LP/7"/10"/12",
-// which are sub-descriptors that only make sense layered on top of a base format. Selecting
-// a second base format while one is already active swaps it out instead of stacking them,
-// since e.g. "Vinyl AND CD" can never match anything.
-const BASE_FORMATS = ["Vinyl", "CD", "Cassette"];
+// A release is physically one medium family, never more than one at once. LP/7"/10"/12" are
+// all sizes of Vinyl, so they belong to the same family as "Vinyl" itself — LP + CD is just
+// as impossible as Vinyl + CD. "Box Set" isn't tied to a medium (a box set can be vinyl, CD,
+// or cassette), so it's left out of this map and stays compatible with anything.
+const FORMAT_FAMILY = {
+  Vinyl: "vinyl",
+  LP: "vinyl",
+  "7\"": "vinyl",
+  "10\"": "vinyl",
+  "12\"": "vinyl",
+  CD: "cd",
+  Cassette: "cassette",
+};
 
 // "Cinder & Rust" — dark earthy palette: near-black brown background, rust-orange
 // accent for primary actions/tags, muted ochre for secondary chips, and a cool
@@ -1276,10 +1284,12 @@ function DiscoverTab({ collectionSource, collectionItems }) {
   function toggleFormat(f) {
     setFormats((prev) => {
       if (prev.includes(f)) return prev.filter((x) => x !== f);
-      if (BASE_FORMATS.includes(f)) {
-        // Swap out any other base format already selected — Vinyl and CD can't both apply
-        // to the same release, so picking one drops the other rather than stacking them.
-        return [...prev.filter((x) => !BASE_FORMATS.includes(x)), f];
+      const family = FORMAT_FAMILY[f];
+      if (family) {
+        // Drop any already-selected chip from a different medium family (e.g. LP replaces
+        // CD, 7" replaces Cassette) — same-family chips (LP + 12") and family-less chips
+        // (Box Set) are left alone since they can genuinely coexist.
+        return [...prev.filter((x) => !FORMAT_FAMILY[x] || FORMAT_FAMILY[x] === family), f];
       }
       return [...prev, f];
     });
