@@ -356,6 +356,12 @@ const COUNTRIES = [
 // more than one, we broaden the query and filter candidates client-side instead.
 const FORMAT_OPTIONS = ["Vinyl", "LP", "CD", "Cassette", "7\"", "10\"", "12\"", "Box Set"];
 
+// A release is physically one of these, never more than one at once — unlike LP/7"/10"/12",
+// which are sub-descriptors that only make sense layered on top of a base format. Selecting
+// a second base format while one is already active swaps it out instead of stacking them,
+// since e.g. "Vinyl AND CD" can never match anything.
+const BASE_FORMATS = ["Vinyl", "CD", "Cassette"];
+
 // "Cinder & Rust" — dark earthy palette: near-black brown background, rust-orange
 // accent for primary actions/tags, muted ochre for secondary chips, and a cool
 // dusty blue reserved for links so it reads as a deliberate accent, not noise.
@@ -710,7 +716,9 @@ function collectionPickMatchesFilters(pick, filters) {
     if (!y || y < start || y >= start + 10) return false;
   }
   if (formats && formats.length > 0) {
-    const matches = formats.some((f) => (pick.format || []).some((pf) => pf.toLowerCase().includes(f.toLowerCase())));
+    // AND across selected chips, not OR — same reasoning as the global-catalog path: "Vinyl"
+    // alone would otherwise match every 7"/10"/12" single too.
+    const matches = formats.every((f) => (pick.format || []).some((pf) => pf.toLowerCase().includes(f.toLowerCase())));
     if (!matches) return false;
   }
   return true;
@@ -1266,7 +1274,15 @@ function DiscoverTab({ collectionSource, collectionItems }) {
   }
 
   function toggleFormat(f) {
-    setFormats((prev) => (prev.includes(f) ? prev.filter((x) => x !== f) : [...prev, f]));
+    setFormats((prev) => {
+      if (prev.includes(f)) return prev.filter((x) => x !== f);
+      if (BASE_FORMATS.includes(f)) {
+        // Swap out any other base format already selected — Vinyl and CD can't both apply
+        // to the same release, so picking one drops the other rather than stacking them.
+        return [...prev.filter((x) => !BASE_FORMATS.includes(x)), f];
+      }
+      return [...prev, f];
+    });
   }
 
   function buildParams(yearOverride) {
@@ -1360,8 +1376,10 @@ function DiscoverTab({ collectionSource, collectionItems }) {
           anyResultsAtAll = true;
 
           if (needsClientFormatCheck) {
+            // Every selected chip must be present (AND, not OR) — otherwise "Vinyl" alone
+            // already matches every 7"/10"/12" single, since they're all vinyl too.
             const pickFormats = pick.format || [];
-            const matches = formats.some((f) => pickFormats.includes(f));
+            const matches = formats.every((f) => pickFormats.includes(f));
             if (!matches) continue;
           }
 
