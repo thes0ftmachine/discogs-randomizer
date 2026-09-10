@@ -579,13 +579,18 @@ const SEARCH_PER_PAGE = 100; // Discogs' max
 const MAX_SAMPLE_PAGES = 100; // 100 × 100 = the ~10k ceiling
 
 // Shared random-pick engine: read the match count off page one, jump to a random page,
-// grab one item. Page one doubles as the count probe so a draw costs 1–2 calls, not 4.
+// grab the whole (filtered, shuffled) page rather than a single item. Page one doubles as
+// the count probe so a draw still costs 1–2 calls, not 4.
+//
+// Returning the full list (not just [0]) lets callers that need to clear an extra detail
+// check (artwork, rating, extraCheck) walk several candidates from the page already in
+// hand before burning a whole "attempt" on a fresh page fetch — see findRelease below.
 async function randomReleaseSearch(baseParams, excluded, signal) {
   const excludedIds = toIdSet(excluded);
   const pageParams = { ...baseParams, per_page: String(SEARCH_PER_PAGE) };
 
   const firstPage = await discogsFetch({ ...pageParams, page: "1" }, signal);
-  if (!firstPage?.pagination?.items) return null;
+  if (!firstPage?.pagination?.items) return [];
 
   const totalPages = Math.min(firstPage.pagination.pages || 1, MAX_SAMPLE_PAGES);
   let response = firstPage;
@@ -605,9 +610,9 @@ async function randomReleaseSearch(baseParams, excluded, signal) {
   const items = (response.results || []).filter((r) =>
     (r.type === "release" || !r.type) && !excludedIds.has(r.id) && !(r.master_id && excludedIds.has(r.master_id))
   );
-  if (items.length === 0) return null;
+  if (items.length === 0) return [];
 
-  return shuffle(items)[0];
+  return shuffle(items);
 }
 
 // ============================== COLLECTION MODE ==============================
@@ -1364,6 +1369,15 @@ function DiscoverTab({ collectionSource, collectionItems }) {
         foundDetail = outcome.foundDetail;
         anyResultsAtAll = outcome.anyResultsAtAll;
       } else {
+        // How many candidates from a single already-fetched page to check before treating
+        // the attempt as a bust and rolling a fresh page. Only matters when a detail check
+        // is in play (onlyArtwork/minRating/extraCheck) — checking one item per page fetch
+        // was the actual bug: a narrow genre+style pair (Rabbit Hole) plus onlyArtwork
+        // defaulting to true meant 10 attempts = 10 total releases checked, so it was easy
+        // to whiff 10/10 purely on artwork-less releases even though plenty of qualifying
+        // releases were sitting unchecked on the same page.
+        const CANDIDATES_PER_PAGE = 15;
+
         for (let i = 0; i < maxAttempts; i++) {
           if (i > 0) await sleep(150);
           const yearForAttempt = randomYearInDecade(decadeOverride || decade);
@@ -1374,41 +1388,46 @@ function DiscoverTab({ collectionSource, collectionItems }) {
             else delete baseParams.style;
           }
 
-          let pick;
+          let candidates;
           try {
-            pick = await randomReleaseSearch(baseParams, seenIdsRef.current, controller.signal);
+            candidates = await randomReleaseSearch(baseParams, seenIdsRef.current, controller.signal);
           } catch (e) {
             if (e.name === "AbortError") return;
             if (String(e?.message || "").includes("rate-limiting")) await sleep(1200);
             continue; // transient hiccup on the search itself — retry rather than failing outright
           }
-          if (!pick) break; // Discogs genuinely has zero matches for these filters
+          if (!candidates.length) break; // Discogs genuinely has zero matches for these filters
           anyResultsAtAll = true;
 
           if (needsClientFormatCheck) {
             // Every selected chip must be present (AND, not OR) — otherwise "Vinyl" alone
             // already matches every 7"/10"/12" single, since they're all vinyl too.
-            const pickFormats = pick.format || [];
-            const matches = formats.every((f) => pickFormats.includes(f));
-            if (!matches) continue;
+            candidates = candidates.filter((c) => formats.every((f) => (c.format || []).includes(f)));
+            if (!candidates.length) continue;
           }
 
           if (needsDetailForSelection) {
-            try {
-              const full = await discogsFetchDetail(pick.resource_url, controller.signal);
-              const rating = full.community?.rating;
-              if (onlyArtwork && !full.images?.some((image) => image.uri || image.uri150)) continue;
-              if (needsRatingCheck && (!rating || rating.count === 0 || rating.average < minRating)) continue;
-              if (extraCheck && !extraCheck(full, pick)) continue;
-              found = pick;
-              foundDetail = full;
-              break;
-            } catch (e) {
-              if (e.name === "AbortError") return;
-              continue;
+            const toCheck = candidates.slice(0, CANDIDATES_PER_PAGE);
+            let matched = false;
+            for (const pick of toCheck) {
+              try {
+                const full = await discogsFetchDetail(pick.resource_url, controller.signal);
+                const rating = full.community?.rating;
+                if (onlyArtwork && !full.images?.some((image) => image.uri || image.uri150)) continue;
+                if (needsRatingCheck && (!rating || rating.count === 0 || rating.average < minRating)) continue;
+                if (extraCheck && !extraCheck(full, pick)) continue;
+                found = pick;
+                foundDetail = full;
+                matched = true;
+                break;
+              } catch (e) {
+                if (e.name === "AbortError") return;
+                continue;
+              }
             }
+            if (matched) break;
           } else {
-            found = pick;
+            found = candidates[0];
             break;
           }
         }
@@ -2524,11 +2543,12 @@ async function drawValidRelease(statKey, excludeId, collectionItems, attempts) {
       // default ranking favors (heavily Electronic). Picking a random genre first and
       // searching within it keeps each genre's odds even instead.
       const genre = GAME_GENRES[Math.floor(Math.random() * GAME_GENRES.length)];
-      const pick = await randomReleaseSearch(
+      const candidates = await randomReleaseSearch(
         { type: "release", format: "Vinyl", genre, year: String(randomGameYear()) },
         excluded
       );
-      if (!pick) continue;
+      if (!candidates.length) continue;
+      const pick = candidates[0];
       const detail = await discogsFetchDetail(pick.resource_url);
       const value = getStatValue(detail, statKey);
       if (value != null) return { pick, detail, value };
@@ -2790,13 +2810,14 @@ async function drawGenreRound(excludeId, collectionItems, attempts) {
       // Same fix as Higher/Lower: search within a randomly chosen genre each attempt so the
       // draw is spread evenly across genres instead of skewed by Discogs' default ranking.
       const genre = GAME_GENRES[Math.floor(Math.random() * GAME_GENRES.length)];
-      const pick = await randomReleaseSearch(
+      const candidates = await randomReleaseSearch(
         { type: "release", format: "Vinyl", genre, year: String(randomGameYear()) },
         excluded
       );
-      if (!pick) continue;
+      if (!candidates.length) continue;
       // The answer has to be one of the buttons on the grid, or the round is unwinnable.
-      if (!(pick.genre || []).some((g) => GAME_GENRES.includes(g))) continue;
+      const pick = candidates.find((c) => (c.genre || []).some((g) => GAME_GENRES.includes(g)));
+      if (!pick) continue;
 
       // The search result already carries genre, style and a cover, so the detail lookup is
       // only an upgrade (full-res image carousel). Don't burn an attempt when it 404s.
