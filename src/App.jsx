@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useEffect, useCallback, useRef } from "react";
+import React, { useState, useMemo, useEffect, useCallback, useRef, useContext, createContext } from "react";
 
 // ---- Controlled vocab (mirrors Discogs' own genre/style taxonomy, trimmed to common picks) ----
 const GENRE_STYLES = {
@@ -370,23 +370,45 @@ const FORMAT_FAMILY = {
   Cassette: "cassette",
 };
 
-// "Cinder & Rust" — dark earthy palette: near-black brown background, rust-orange
-// accent for primary actions/tags, muted ochre for secondary chips, and a cool
-// dusty blue reserved for links so it reads as a deliberate accent, not noise.
-const PALETTE = {
-  bg: "#1E1610",
-  card: "#251C15",
+// "Cinder & Rust" (dark) and "Record Bin" (light) — same warm, earthy crate-digging
+// identity in both modes: near-black brown or sandy cream background, burnt-orange
+// accent for primary actions, and a gold/ochre tone reserved for links and secondary
+// highlights so it reads as a deliberate accent, not noise.
+const DARK_PALETTE = {
+  bg: "#1A1310",
+  card: "#241A16",
   border: "#453629",
   borderStrong: "#5A4634",
   primary: "#EDE2D3",
   muted: "#C9B8A0",
   mutedLight: "#9C8973",
-  accent: "#C1592B",
-  accentDark: "#5D8098",
+  accent: "#E0713F",
+  accentDark: "#D9BA6A",
   success: "#6B9C5E",
   danger: "#D9695F",
   warn: "#B98B3E",
 };
+
+const LIGHT_PALETTE = {
+  bg: "#EDE9DE",
+  card: "#F7F4EC",
+  border: "#C9C0A8",
+  borderStrong: "#A67C2E",
+  primary: "#241A16",
+  muted: "#5F5346",
+  mutedLight: "#8A8073",
+  accent: "#C1502E",
+  accentDark: "#8C6A1F",
+  success: "#4B7A3E",
+  danger: "#B23A30",
+  warn: "#8C6A1F",
+};
+
+// Provides the active palette AND the palette-derived style objects to components
+// that render outside App's own scope (icons, tabs, game screens), without threading
+// `palette`/`styles` props through every level. Default value covers the (rare) case
+// of a component rendering outside the provider, e.g. in tests.
+const PaletteContext = createContext({ palette: DARK_PALETTE, styles: null });
 
 // Discogs' image CDN occasionally 404s on an otherwise valid URL. Rather than giving up
 // immediately, retry the same URL once (with a cache-busting param) before falling back to
@@ -768,6 +790,7 @@ async function randomFromCollection(items, filters, excluded, needsDetail, extra
 }
 
 function Turntable({ size = 64 }) {
+  const { palette: PALETTE } = useContext(PaletteContext);
   return (
     <div style={{ width: size, height: size, flexShrink: 0 }}>
       <svg viewBox="0 0 100 100" width={size} height={size}>
@@ -798,14 +821,47 @@ function Turntable({ size = 64 }) {
   );
 }
 
+const THEME_STORAGE_KEY = "discogs-randomizer-theme";
+
+// Reads any previously-saved choice first; if there isn't one, defers to the OS/browser
+// light-vs-dark setting so a first-time visitor sees the mode they already prefer elsewhere.
+function getInitialTheme() {
+  if (typeof window === "undefined") return "dark";
+  try {
+    const saved = window.localStorage.getItem(THEME_STORAGE_KEY);
+    if (saved === "light" || saved === "dark") return saved;
+  } catch {
+    // localStorage can throw in private-browsing/blocked-storage contexts — fall through.
+  }
+  if (window.matchMedia && window.matchMedia("(prefers-color-scheme: light)").matches) {
+    return "light";
+  }
+  return "dark";
+}
+
 export default function App() {
   const [tab, setTab] = useState("discover"); // 'discover' | 'search' | 'games'
   const [collectionSource, setCollectionSource] = useState(null); // { username } | null
   const [collectionItems, setCollectionItems] = useState(null); // cached array, or null if not connected
   const [collectionLoading, setCollectionLoading] = useState(false);
   const [collectionError, setCollectionError] = useState("");
+  const [theme, setTheme] = useState(getInitialTheme);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(THEME_STORAGE_KEY, theme);
+    } catch {
+      // Same private-browsing/blocked-storage case as above — theme still works for this
+      // session, it just won't be remembered next visit.
+    }
+  }, [theme]);
+
+  const PALETTE = theme === "light" ? LIGHT_PALETTE : DARK_PALETTE;
+  const styles = useMemo(() => buildStyles(PALETTE), [PALETTE]);
+  const contextValue = useMemo(() => ({ palette: PALETTE, styles }), [PALETTE, styles]);
 
   return (
+    <PaletteContext.Provider value={contextValue}>
     <div style={styles.page}>
       <style>{`
       * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -883,10 +939,32 @@ export default function App() {
       <div style={styles.container}>
 <header style={{ ...styles.header, display: "flex", alignItems: "center", gap: 16 }}>
   <Turntable size={64} />
-  <div>
+  <div style={{ flex: 1 }}>
     <h1 style={styles.title}>Discogs Randomizer</h1>
     <p style={styles.subtitle}>Explore the depths of Discogs releases at random (kind of) or play a few mini games.</p>
   </div>
+  <button
+    type="button"
+    onClick={() => setTheme((t) => (t === "light" ? "dark" : "light"))}
+    aria-label={theme === "light" ? "Switch to dark mode" : "Switch to light mode"}
+    title={theme === "light" ? "Switch to dark mode" : "Switch to light mode"}
+    style={{
+      flexShrink: 0,
+      width: 40,
+      height: 40,
+      borderRadius: "50%",
+      border: `1px solid ${PALETTE.border}`,
+      background: PALETTE.card,
+      color: PALETTE.primary,
+      fontSize: 18,
+      cursor: "pointer",
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "center",
+    }}
+  >
+    {theme === "light" ? "☾" : "☀"}
+  </button>
 </header>
 
         <div style={styles.tabRow}>
@@ -930,6 +1008,7 @@ export default function App() {
         )}
       </div>
     </div>
+    </PaletteContext.Provider>
   );
 }
 
@@ -980,6 +1059,7 @@ function clearCollectionCache(type, username) {
 // both Discover and Games to the connected collection — it isn't a separate destination.
 
 function CollectionBar({ collectionSource, setCollectionSource, collectionItems, setCollectionItems, loading, setLoading, error, setError }) {
+  const { palette: PALETTE, styles } = useContext(PaletteContext);
   const [draftUsername, setDraftUsername] = useState("");
   const [progress, setProgress] = useState(null); // { loaded, total } | null
   const requestRef = useRef(null);
@@ -1224,6 +1304,7 @@ function CollectionBar({ collectionSource, setCollectionSource, collectionItems,
 // ============================== DISCOVER TAB ==============================
 
 function DiscoverTab({ collectionSource, collectionItems }) {
+  const { palette: PALETTE, styles } = useContext(PaletteContext);
   const [genre, setGenre] = useState("Any Genre");
   const [style, setStyle] = useState("");
   const [decade, setDecade] = useState("Any Decade");
@@ -1912,6 +1993,7 @@ function isAnyFilterActive(f) {
 }
 
 function SearchTab({ collectionSource, collectionItems }) {
+  const { styles } = useContext(PaletteContext);
   const [query, setQuery] = useState("");
   const [submittedQuery, setSubmittedQuery] = useState("");
   const [releasesOnly, setReleasesOnly] = useState(true);
@@ -2321,6 +2403,7 @@ function SearchTab({ collectionSource, collectionItems }) {
 }
 
 function SearchResultModal({ result, detail, loading, error, imageIndex, setImageIndex, onClose }) {
+  const { styles } = useContext(PaletteContext);
   const isMaster = result.type === "master";
   const images = detail?.images || [];
   const coverSrc = images[imageIndex]?.uri || images[imageIndex]?.uri150 || result.cover_image || null;
@@ -2448,6 +2531,7 @@ function SearchResultModal({ result, detail, loading, error, imageIndex, setImag
 // ============================== GAMES TAB ==============================
 
 function GamesTab({ collectionSource, collectionItems }) {
+  const { styles } = useContext(PaletteContext);
   const [game, setGame] = useState("genre"); // 'higherlower' | 'genre'
 
   return (
@@ -2564,6 +2648,7 @@ async function drawValidRelease(statKey, excludeId, collectionItems, attempts) {
 }
 
 function HigherLowerGame({ collectionItems }) {
+  const { palette: PALETTE, styles } = useContext(PaletteContext);
   const [statKey, setStatKey] = useState("have");
   const [champion, setChampion] = useState(null); // { pick, detail, value }
   const [challenger, setChallenger] = useState(null);
@@ -2703,6 +2788,7 @@ function HigherLowerGame({ collectionItems }) {
 }
 
 function GameCard({ release, statMeta, role, statRevealed, value, resultBanner }) {
+  const { palette: PALETTE, styles } = useContext(PaletteContext);
   const detail = release.detail;
   const pick = release.pick;
   const cover = detail?.images?.[0]?.uri || detail?.images?.[0]?.uri150 || pick?.cover_image || null;
@@ -2837,6 +2923,7 @@ async function drawGenreRound(excludeId, collectionItems, attempts) {
 }
 
 function GuessGenreGame({ collectionItems }) {
+  const { palette: PALETTE, styles } = useContext(PaletteContext);
   const [round, setRound] = useState(null); // { pick, detail }
   const [phase, setPhase] = useState("guessing"); // 'guessing' | 'revealed'
   const [guessedGenre, setGuessedGenre] = useState(null);
@@ -3014,7 +3101,10 @@ function GuessGenreGame({ collectionItems }) {
   );
 }
 
-const styles = {
+// Takes the active palette so switching themes recomputes every style that depends on
+// color; called once per palette change via useMemo in App, not on every render.
+function buildStyles(PALETTE) {
+  return {
   page: {
     minHeight: "100vh",
     background: PALETTE.bg,
@@ -3596,4 +3686,5 @@ const styles = {
   },
   modalCover: { width: "100%", aspectRatio: "1 / 1", objectFit: "cover", background: PALETTE.border, display: "block" },
   modalBody: { padding: "18px 20px 20px" },
-};
+  };
+}
