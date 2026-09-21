@@ -942,48 +942,6 @@ export default function App() {
     <h1 style={styles.title}>Discogs Randomizer</h1>
     <p style={styles.subtitle}>Explore the depths of Discogs releases at random (kind of) or play a few mini games.</p>
   </div>
-  <button
-    type="button"
-    onClick={() => setTheme((t) => (t === "light" ? "dark" : "light"))}
-    aria-label={theme === "light" ? "Switch to dark mode" : "Switch to light mode"}
-    title={theme === "light" ? "Switch to dark mode" : "Switch to light mode"}
-    style={{
-      position: "relative",
-      flexShrink: 0,
-      width: 76,
-      height: 44,
-      padding: 3,
-      borderRadius: 999,
-      border: `2px solid ${PALETTE.border}`,
-      background: theme === "dark" ? "#171513" : "#DED7C8",
-      cursor: "pointer",
-      transition: "background 0.25s ease, border-color 0.25s ease",
-      boxSizing: "border-box",
-    }}
-  >
-    <span
-      aria-hidden="true"
-      style={{
-        position: "absolute",
-        top: 3,
-        left: theme === "dark" ? 3 : 35,
-        width: 36,
-        height: 36,
-        borderRadius: "50%",
-        background: theme === "dark" ? "#B47D47" : "#E0B35F",
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "center",
-        color: "#241A16",
-        fontSize: 21,
-        lineHeight: 1,
-        transition: "left 0.25s ease, background 0.25s ease",
-        boxShadow: "0 1px 3px rgba(0,0,0,0.25)",
-      }}
-    >
-      {theme === "dark" ? "☾" : "☀"}
-    </span>
-  </button>
 </header>
 
         <div style={styles.tabRow}>
@@ -1004,6 +962,50 @@ export default function App() {
             onClick={() => setTab("games")}
           >
             Games
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setTheme((t) => (t === "light" ? "dark" : "light"))}
+            aria-label={theme === "light" ? "Switch to dark mode" : "Switch to light mode"}
+            title={theme === "light" ? "Switch to dark mode" : "Switch to light mode"}
+            style={{
+              position: "relative",
+              flexShrink: 0,
+              width: 62,
+              height: 36,
+              padding: 2,
+              borderRadius: 999,
+              border: `1px solid ${PALETTE.mutedLight}`,
+              background: "transparent",
+              color: PALETTE.mutedLight,
+              cursor: "pointer",
+              transition: "border-color 0.25s ease",
+              boxSizing: "border-box",
+              marginLeft: "auto",
+            }}
+          >
+            <span
+              aria-hidden="true"
+              style={{
+                position: "absolute",
+                top: 3,
+                left: theme === "dark" ? 3 : 31,
+                width: 28,
+                height: 28,
+                borderRadius: "50%",
+                background: PALETTE.mutedLight,
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                color: PALETTE.bg,
+                fontSize: 16,
+                lineHeight: 1,
+                transition: "left 0.25s ease",
+              }}
+            >
+              {theme === "dark" ? "☾" : "☀"}
+            </span>
           </button>
         </div>
 
@@ -3136,7 +3138,13 @@ function buildStyles(PALETTE) {
   title: { fontSize: 28, fontWeight: 700, margin: 0 },
   subtitle: { fontSize: 14, color: PALETTE.muted, marginTop: 6 },
 
-  tabRow: { display: "flex", gap: 8, marginBottom: 20, borderBottom: `1px solid ${PALETTE.border}` },
+  tabRow: {
+    display: "flex",
+    alignItems: "center",
+    gap: 8,
+    marginBottom: 20,
+    borderBottom: `1px solid ${PALETTE.border}`,
+  },
   tabButton: {
     padding: "10px 4px",
     marginRight: 16,
