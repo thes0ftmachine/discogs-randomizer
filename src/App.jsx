@@ -797,7 +797,6 @@ function Turntable({ size = 64 }) {
         {/* platter base */}
         <circle cx="50" cy="50" r="48" fill={PALETTE.borderStrong} />
         <circle cx="50" cy="50" r="44" fill={PALETTE.primary} />
-
         {/* spinning record */}
         <g className="discovery-record-spin" style={{ transformOrigin: "50px 50px" }}>
           <circle cx="50" cy="50" r="40" fill="#1b1b1b" />
@@ -949,21 +948,41 @@ export default function App() {
     aria-label={theme === "light" ? "Switch to dark mode" : "Switch to light mode"}
     title={theme === "light" ? "Switch to dark mode" : "Switch to light mode"}
     style={{
+      position: "relative",
       flexShrink: 0,
-      width: 40,
-      height: 40,
-      borderRadius: "50%",
-      border: `1px solid ${PALETTE.border}`,
-      background: PALETTE.card,
-      color: PALETTE.primary,
-      fontSize: 18,
+      width: 76,
+      height: 44,
+      padding: 3,
+      borderRadius: 999,
+      border: `2px solid ${PALETTE.border}`,
+      background: theme === "dark" ? "#171513" : "#DED7C8",
       cursor: "pointer",
-      display: "flex",
-      alignItems: "center",
-      justifyContent: "center",
+      transition: "background 0.25s ease, border-color 0.25s ease",
+      boxSizing: "border-box",
     }}
   >
-    {theme === "light" ? "☾" : "☀"}
+    <span
+      aria-hidden="true"
+      style={{
+        position: "absolute",
+        top: 3,
+        left: theme === "dark" ? 3 : 35,
+        width: 36,
+        height: 36,
+        borderRadius: "50%",
+        background: theme === "dark" ? "#B47D47" : "#E0B35F",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        color: "#241A16",
+        fontSize: 21,
+        lineHeight: 1,
+        transition: "left 0.25s ease, background 0.25s ease",
+        boxShadow: "0 1px 3px rgba(0,0,0,0.25)",
+      }}
+    >
+      {theme === "dark" ? "☾" : "☀"}
+    </span>
   </button>
 </header>
 
