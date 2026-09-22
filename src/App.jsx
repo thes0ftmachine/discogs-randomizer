@@ -2485,6 +2485,139 @@ function SearchTab({ collectionSource, collectionItems }) {
   );
 }
 
+// Discogs doesn't host audio previews itself — the closest thing the release endpoint
+// offers is a community-submitted `videos` list (almost always YouTube links, and not
+// necessarily one per track, or in track order). We line these up with tracklist entries by
+// loosely matching titles, so "Play" can show up next to the right song when Discogs has one.
+function normalizeTrackTitle(s) {
+  return String(s || "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+}
+
+function matchTrackVideo(track, unmatchedVideos) {
+  const norm = normalizeTrackTitle(track?.title);
+  if (norm.length < 3) return null; // too short/generic ("Intro") to match safely
+  const idx = unmatchedVideos.findIndex((v) => {
+    const vNorm = normalizeTrackTitle(v.title);
+    return vNorm.length >= 3 && (vNorm.includes(norm) || norm.includes(vNorm));
+  });
+  if (idx === -1) return null;
+  return unmatchedVideos.splice(idx, 1)[0];
+}
+
+function youtubeEmbedId(url) {
+  const m = String(url || "").match(/(?:youtu\.be\/|youtube\.com\/(?:watch\?v=|embed\/))([\w-]{11})/);
+  return m ? m[1] : null;
+}
+
+function formatVideoDuration(seconds) {
+  if (!Number.isFinite(seconds) || seconds <= 0) return null;
+  const m = Math.floor(seconds / 60);
+  const s = String(seconds % 60).padStart(2, "0");
+  return `${m}:${s}`;
+}
+
+function TrackVideoPlayer({ video }) {
+  const { styles } = useContext(PaletteContext);
+  const videoId = youtubeEmbedId(video.uri);
+  if (!videoId) {
+    // Not a YouTube link (rare, but Discogs allows other hosts) — just link out instead.
+    return (
+      <a href={video.uri} target="_blank" rel="noreferrer" style={styles.link}>
+        Listen: {video.title} →
+      </a>
+    );
+  }
+  return (
+    <div style={styles.videoEmbedWrap}>
+      <iframe
+        src={`https://www.youtube.com/embed/${videoId}?autoplay=1`}
+        title={video.title}
+        style={styles.videoEmbed}
+        allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+        allowFullScreen
+      />
+    </div>
+  );
+}
+
+function Tracklist({ tracklist, videos }) {
+  const { styles } = useContext(PaletteContext);
+  const [playingKey, setPlayingKey] = useState(null);
+
+  if (!tracklist || tracklist.length === 0) return null;
+
+  // Consume videos as we match them left-to-right so the same video isn't offered twice,
+  // then whatever's left over (no confident title match) still gets listed below.
+  const remainingVideos = [...(videos || [])];
+  const rows = tracklist.map((t, i) => ({
+    ...t,
+    key: `${t.position || ""}-${i}`,
+    video: t.type_ === "track" || !t.type_ ? matchTrackVideo(t, remainingVideos) : null,
+  }));
+
+  return (
+    <div style={styles.trackSection}>
+      <h3 style={styles.trackSectionTitle}>Tracklist</h3>
+      <div style={styles.trackList}>
+        {rows.map((t) =>
+          t.type_ === "heading" ? (
+            <div key={t.key} style={styles.trackHeading}>{t.title}</div>
+          ) : (
+            <div key={t.key}>
+              <div style={styles.trackRow}>
+                <span style={styles.trackPosition}>{t.position}</span>
+                <span style={styles.trackTitle}>
+                  {t.title}
+                  {t.extraartists?.length > 0 && (
+                    <span style={styles.trackCredit}>
+                      {" "}— {t.extraartists.map((a) => a.name).join(", ")}
+                    </span>
+                  )}
+                </span>
+                <span style={styles.trackDuration}>{t.duration || ""}</span>
+                {t.video && (
+                  <button
+                    type="button"
+                    style={styles.trackPlayButton}
+                    onClick={() => setPlayingKey((k) => (k === t.key ? null : t.key))}
+                    aria-label={playingKey === t.key ? `Hide video for ${t.title}` : `Play ${t.title}`}
+                  >
+                    {playingKey === t.key ? "✕" : "▶"}
+                  </button>
+                )}
+              </div>
+              {playingKey === t.key && t.video && <TrackVideoPlayer video={t.video} />}
+            </div>
+          )
+        )}
+      </div>
+
+      {remainingVideos.length > 0 && (
+        <div style={styles.videoFallbackSection}>
+          <h4 style={styles.trackSectionTitle}>Other videos</h4>
+          {remainingVideos.map((v, i) => (
+            <div key={`${v.uri}-${i}`}>
+              <div style={styles.trackRow}>
+                <span style={styles.trackTitle}>{v.title}</span>
+                <span style={styles.trackDuration}>{formatVideoDuration(v.duration) || ""}</span>
+                <button
+                  type="button"
+                  style={styles.trackPlayButton}
+                  onClick={() => setPlayingKey((k) => (k === `extra-${i}` ? null : `extra-${i}`))}
+                  aria-label={playingKey === `extra-${i}` ? `Hide video for ${v.title}` : `Play ${v.title}`}
+                >
+                  {playingKey === `extra-${i}` ? "✕" : "▶"}
+                </button>
+              </div>
+              {playingKey === `extra-${i}` && <TrackVideoPlayer video={v} />}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function SearchResultModal({ result, detail, loading, error, imageIndex, setImageIndex, onClose }) {
   const { styles } = useContext(PaletteContext);
   const isMaster = result.type === "master";
@@ -2599,6 +2732,8 @@ function SearchResultModal({ result, detail, loading, error, imageIndex, setImag
                   .filter(Boolean)
                   .join(" · ")}
               </p>
+
+              <Tracklist tracklist={detail?.tracklist} videos={detail?.videos} />
             </>
           )}
 
@@ -3446,6 +3581,31 @@ function buildStyles(PALETTE) {
   stars: { color: PALETTE.accent, fontSize: 14, letterSpacing: 1 },
   metaLine: { fontSize: 13, color: PALETTE.primary, margin: "6px 0" },
   link: { display: "inline-block", marginTop: 10, fontSize: 14, color: PALETTE.accentDark, fontWeight: 700, textDecoration: "underline" },
+  trackSection: { marginTop: 14, paddingTop: 14, borderTop: `1px solid ${PALETTE.border}` },
+  trackSectionTitle: { fontSize: 13, fontWeight: 800, textTransform: "uppercase", letterSpacing: 0.4, color: PALETTE.muted, margin: "0 0 8px" },
+  trackList: { display: "flex", flexDirection: "column", gap: 2 },
+  trackHeading: { fontSize: 12, fontWeight: 700, color: PALETTE.accentDark, margin: "10px 0 2px" },
+  trackRow: { display: "flex", alignItems: "baseline", gap: 8, padding: "5px 0", fontSize: 13.5 },
+  trackPosition: { color: PALETTE.muted, minWidth: 24, fontSize: 12 },
+  trackTitle: { flex: 1, color: PALETTE.primary },
+  trackCredit: { color: PALETTE.muted, fontSize: 12 },
+  trackDuration: { color: PALETTE.muted, fontSize: 12, fontVariantNumeric: "tabular-nums" },
+  trackPlayButton: {
+    border: `1px solid ${PALETTE.border}`,
+    background: PALETTE.card,
+    color: PALETTE.accentDark,
+    borderRadius: 999,
+    width: 26,
+    height: 26,
+    fontSize: 12,
+    lineHeight: "24px",
+    textAlign: "center",
+    cursor: "pointer",
+    flexShrink: 0,
+  },
+  videoEmbedWrap: { position: "relative", width: "100%", paddingTop: "56.25%", margin: "6px 0 10px", borderRadius: 8, overflow: "hidden", background: "#000" },
+  videoEmbed: { position: "absolute", top: 0, left: 0, width: "100%", height: "100%", border: 0 },
+  videoFallbackSection: { marginTop: 12 },
   historySection: { marginTop: 24 },
   discoveryModeRow: { display: "flex", gap: 8, marginTop: 16, flexWrap: "wrap" },
   modeButton: {
