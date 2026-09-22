@@ -9,6 +9,33 @@ function sendError(res, status, message, retryAfter) {
   return res.status(status).json({ error: message });
 }
 
+// Discogs' own message field is sometimes missing on throttling responses (an empty body,
+// or a non-JSON edge/CDN page that our .json().catch(() => ({})) above turns into {}), which
+// is how a real rate limit ends up surfacing to the user as an opaque "could not complete
+// that request." Naming 429 explicitly here means that case always gets an accurate,
+// actionable message regardless of what Discogs actually sent back.
+function upstreamErrorMessage(status, data, kind) {
+  if (status === 429) {
+    return "Discogs is rate-limiting this connection right now. This happens on large collections — it will retry automatically.";
+  }
+  if (status === 404 && kind === "collection") {
+    return "That collection is private or the username doesn't exist.";
+  }
+  return data.message || "Discogs could not complete that request.";
+}
+
+// Discogs' rate limit is a moving 60s window, not a hard per-request quota — so instead of
+// only reacting after we get throttled, forward what Discogs told us about our remaining
+// budget on *every* response. The client uses this to slow itself down proactively while
+// paging a large collection, rather than firing requests as fast as possible until it trips
+// the limit.
+function forwardRateLimitHeaders(upstream, res) {
+  const remaining = upstream.headers.get("x-discogs-ratelimit-remaining");
+  const limit = upstream.headers.get("x-discogs-ratelimit");
+  if (remaining != null) res.setHeader("X-Discogs-Ratelimit-Remaining", remaining);
+  if (limit != null) res.setHeader("X-Discogs-Ratelimit", limit);
+}
+
 export default async function handler(req, res) {
   const token = process.env.DISCOGS_TOKEN;
   if (!token) return sendError(res, 500, "The Discogs connection has not been configured.");
@@ -43,8 +70,9 @@ export default async function handler(req, res) {
     try {
       const upstream = await fetch(url, { headers: { Authorization: authHeader, "User-Agent": USER_AGENT } });
       const retryAfter = upstream.headers.get("retry-after");
+      forwardRateLimitHeaders(upstream, res);
       const data = await upstream.json().catch(() => ({}));
-      if (!upstream.ok) return sendError(res, upstream.status, data.message || "Discogs could not complete that request.", retryAfter);
+      if (!upstream.ok) return sendError(res, upstream.status, upstreamErrorMessage(upstream.status, data, kind), retryAfter);
       res.setHeader("Cache-Control", "no-store");
       return res.status(200).json(data);
     } catch {
@@ -71,14 +99,9 @@ export default async function handler(req, res) {
   try {
     const upstream = await fetch(url, { headers: { "User-Agent": USER_AGENT } });
     const retryAfter = upstream.headers.get("retry-after");
+    forwardRateLimitHeaders(upstream, res);
     const data = await upstream.json().catch(() => ({}));
-    if (!upstream.ok) {
-      const message =
-        upstream.status === 404 && kind === "collection"
-          ? "That collection is private or the username doesn't exist."
-          : data.message || "Discogs could not complete that request.";
-      return sendError(res, upstream.status, message, retryAfter);
-    }
+    if (!upstream.ok) return sendError(res, upstream.status, upstreamErrorMessage(upstream.status, data, kind), retryAfter);
     res.setHeader("Cache-Control", kind === "release" ? "s-maxage=3600, stale-while-revalidate=86400" : "no-store");
     return res.status(200).json(data);
   } catch {
