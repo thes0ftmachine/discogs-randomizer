@@ -1,4 +1,5 @@
 import React, { useState, useMemo, useEffect, useCallback, useRef, useContext, createContext } from "react";
+import { Moon, Sun } from "lucide-react";
 
 // ---- Controlled vocab (mirrors Discogs' own genre/style taxonomy, trimmed to common picks) ----
 const GENRE_STYLES = {
@@ -1004,7 +1005,7 @@ export default function App() {
                 transition: "left 0.25s ease",
               }}
             >
-              {theme === "dark" ? "☾" : "☀"}
+              {theme === "dark" ? <Moon size={16} strokeWidth={1.7} /> : <Sun size={16} strokeWidth={1.7} />}
             </span>
           </button>
         </div>
