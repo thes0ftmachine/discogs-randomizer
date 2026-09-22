@@ -1,5 +1,4 @@
 import React, { useState, useMemo, useEffect, useCallback, useRef, useContext, createContext } from "react";
-import { Moon, Sun } from "lucide-react";
 
 // ---- Controlled vocab (mirrors Discogs' own genre/style taxonomy, trimmed to common picks) ----
 const GENRE_STYLES = {
@@ -1005,7 +1004,16 @@ export default function App() {
                 transition: "left 0.25s ease",
               }}
             >
-              {theme === "dark" ? <Moon size={16} strokeWidth={1.7} /> : <Sun size={16} strokeWidth={1.7} />}
+              {theme === "dark" ? (
+                <svg width="16" height="16" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                  <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79Z" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" />
+                </svg>
+              ) : (
+                <svg width="16" height="16" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                  <circle cx="12" cy="12" r="4" fill="none" stroke="currentColor" strokeWidth="1.7" />
+                  <path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" />
+                </svg>
+              )}
             </span>
           </button>
         </div>
