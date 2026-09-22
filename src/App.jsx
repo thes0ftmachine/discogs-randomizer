@@ -561,13 +561,20 @@ function randomYearInDecade(decade) {
 
 async function apiFetch(params, signal) {
   const res = await fetch("/api/discogs?" + new URLSearchParams(params), { signal });
+  // Discogs' remaining-requests-in-this-window count, forwarded through our proxy. Read it
+  // regardless of ok/error status — it's just as useful for pacing ahead of a 429 as it is
+  // for confirming we're clear after one.
+  const rateLimitRemaining = Number(res.headers.get("X-Discogs-Ratelimit-Remaining"));
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
     const error = new Error(body.error || `Discogs lookup failed (${res.status}).`);
     error.retryAfter = Number(res.headers.get("Retry-After")) || 0;
+    error.rateLimitRemaining = Number.isFinite(rateLimitRemaining) ? rateLimitRemaining : null;
     throw error;
   }
-  return res.json();
+  const data = await res.json();
+  if (Number.isFinite(rateLimitRemaining)) data.__rateLimitRemaining = rateLimitRemaining;
+  return data;
 }
 
 async function discogsFetch(params, signal) {
@@ -676,10 +683,43 @@ async function apiFetchWithTimeout(params, signal, timeoutMs = 15000) {
   }
 }
 
-// Fetches one page with a timeout, retrying a couple of times on a stall or transient
-// hiccup before giving up — so a single flaky request degrades to a visible error instead
-// of an infinite spinner.
-async function fetchCollectionPage(params, signal, maxAttempts = 3) {
+// Like sleep(), but resolves early (without throwing) if the signal aborts mid-wait, so
+// cancelling a collection load doesn't have to sit through a pacing delay or a retry
+// backoff before it actually stops.
+function abortableSleep(ms, signal) {
+  return new Promise((resolve) => {
+    if (signal?.aborted) return resolve();
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    const onAbort = () => {
+      clearTimeout(timer);
+      resolve();
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+// Discogs throttles authenticated requests to 60/min as a moving 60s-window average (see
+// https://www.discogs.com/developers, "Rate Limiting") and explicitly asks clients to
+// throttle themselves locally rather than just reacting to 429s. A 9,000+ item collection
+// is 90+ pages, and firing those back-to-back with no pacing reliably outruns that limit —
+// which is what was producing the generic "Discogs could not complete that request" error.
+// Spacing page *starts* at least this far apart caps us at ~54 req/min, comfortably under
+// the ceiling even with zero network latency.
+const MIN_PAGE_INTERVAL_MS = 1100;
+// If Discogs tells us we're down to a handful of requests left in the current window,
+// ease off harder than the baseline pace instead of waiting to actually get throttled.
+const RATE_LIMIT_LOW_WATERMARK = 5;
+const RATE_LIMIT_COOLDOWN_MS = 5000;
+
+// Fetches one page with a timeout, retrying on a stall, a transient hiccup, or a genuine
+// rate-limit response before giving up — so a single flaky request degrades to a visible
+// error instead of an infinite spinner. maxAttempts is higher than a typical single-resource
+// fetch because paging a huge collection makes an occasional 429 an expected event to
+// recover from, not a rare failure.
+async function fetchCollectionPage(params, signal, maxAttempts = 6) {
   let lastError;
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
     if (signal?.aborted) {
@@ -692,10 +732,10 @@ async function fetchCollectionPage(params, signal, maxAttempts = 3) {
     } catch (e) {
       if (e.name === "AbortError") throw e;
       lastError = e;
-      // Back off a bit before retrying — mirrors the retry-after handling used elsewhere
-      // in the app for genuine rate-limit responses, otherwise just a short pause.
+      // Prefer Discogs' own Retry-After when it sent one (a real rate-limit response);
+      // otherwise fall back to a growing pause for ordinary transient errors.
       const waitMs = e.retryAfter ? e.retryAfter * 1000 : 800 * (attempt + 1);
-      if (attempt < maxAttempts - 1) await sleep(waitMs);
+      if (attempt < maxAttempts - 1) await abortableSleep(waitMs, signal);
     }
   }
   throw lastError || new Error("Couldn't load that page of the collection.");
@@ -709,11 +749,24 @@ async function fetchFullCollection({ username, useAuth = false } = {}, signal, o
     const params = useAuth
       ? { kind: "my-collection", page: String(page), per_page: String(COLLECTION_PER_PAGE) }
       : { kind: "collection", username, page: String(page), per_page: String(COLLECTION_PER_PAGE) };
+    const requestStarted = Date.now();
     const data = await fetchCollectionPage(params, signal);
     pages = data?.pagination?.pages || 1;
     items.push(...(data?.releases || []));
     onProgress?.(items.length, data?.pagination?.items || items.length);
     page++;
+
+    if (page <= pages && !signal?.aborted) {
+      // Stay ahead of the throttle rather than reacting to it: always leave at least
+      // MIN_PAGE_INTERVAL_MS between the start of one page request and the next, and back
+      // off further still if Discogs says our remaining quota for this window is low.
+      const remaining = data?.__rateLimitRemaining;
+      const elapsed = Date.now() - requestStarted;
+      const pacingWait = Math.max(0, MIN_PAGE_INTERVAL_MS - elapsed);
+      const lowQuotaWait = Number.isFinite(remaining) && remaining <= RATE_LIMIT_LOW_WATERMARK ? RATE_LIMIT_COOLDOWN_MS : 0;
+      const waitMs = Math.max(pacingWait, lowQuotaWait);
+      if (waitMs > 0) await abortableSleep(waitMs, signal);
+    }
   } while (page <= pages);
   return items;
 }
