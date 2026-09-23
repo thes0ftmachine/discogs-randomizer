@@ -1401,6 +1401,25 @@ function CollectionBar({ collectionSource, setCollectionSource, collectionItems,
 
 // ============================== DISCOVER TAB ==============================
 
+// A collapsed-by-default "Expand ▾" link that reveals the same Tracklist used in Search.
+// Deliberately a separate component (rather than a useState in DiscoverTab itself) so that
+// mounting it inside the result card's key={result.id} wrapper means a fresh draw always
+// starts collapsed again, instead of carrying an expanded tracklist over from the last pick.
+function TracklistToggle({ tracklist, videos }) {
+  const { styles } = useContext(PaletteContext);
+  const [expanded, setExpanded] = useState(false);
+  if (!tracklist || tracklist.length === 0) return null;
+  return (
+    <>
+      <button type="button" style={styles.expandToggle} onClick={() => setExpanded((e) => !e)} aria-expanded={expanded}>
+        {expanded ? "Collapse" : "Expand"}{" "}
+        <span style={{ ...styles.expandToggleArrow, ...(expanded ? styles.expandToggleArrowOpen : {}) }} aria-hidden="true">▾</span>
+      </button>
+      {expanded && <Tracklist tracklist={tracklist} videos={videos} />}
+    </>
+  );
+}
+
 function DiscoverTab({ collectionSource, collectionItems }) {
   const { palette: PALETTE, styles } = useContext(PaletteContext);
   const [genre, setGenre] = useState("Any Genre");
@@ -1977,6 +1996,8 @@ function DiscoverTab({ collectionSource, collectionItems }) {
             {result.label && result.label.length > 0 && (
               <p style={styles.metaLine}><strong>Label:</strong> {result.label.join(", ")}</p>
             )}
+
+            <TracklistToggle tracklist={detail?.tracklist} videos={detail?.videos} />
 
             <a
               href={"https://www.discogs.com" + (result.uri || "")}
@@ -3806,6 +3827,24 @@ function buildStyles(PALETTE) {
   stars: { color: PALETTE.accent, fontSize: 14, letterSpacing: 1 },
   metaLine: { fontSize: 13, color: PALETTE.primary, margin: "6px 0" },
   link: { display: "inline-block", marginTop: 10, fontSize: 14, color: PALETTE.accentDark, fontWeight: 700, textDecoration: "underline" },
+  expandToggle: {
+    display: "inline-flex",
+    alignItems: "center",
+    gap: 4,
+    marginTop: 10,
+    marginRight: 12,
+    border: "none",
+    background: "none",
+    padding: 0,
+    fontSize: 14,
+    fontWeight: 700,
+    color: PALETTE.accentDark,
+    textDecoration: "underline",
+    cursor: "pointer",
+  },
+  expandToggleArrow: { display: "inline-block", transition: "transform 0.15s" },
+  expandToggleArrowOpen: { transform: "rotate(180deg)" },
+
   trackSection: { marginTop: 14, paddingTop: 14, borderTop: `1px solid ${PALETTE.border}` },
   trackSectionTitle: { fontSize: 13, fontWeight: 800, textTransform: "uppercase", letterSpacing: 0.4, color: PALETTE.muted, margin: "0 0 8px" },
   trackList: { display: "flex", flexDirection: "column", gap: 2 },
