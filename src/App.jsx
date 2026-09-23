@@ -1116,41 +1116,88 @@ export default function App() {
 
 // A full collection load is the slowest thing this app does, and it's genuinely slow for a
 // large collection — pagination-with-timeouts fixes the "stuck forever" failure mode, but a
-// multi-hundred-item collection still takes real wall-clock time to re-page from scratch on
-// every single visit. Caching the last successful load in localStorage means a same-session
-// (or same-day) reopen can skip the network entirely and show the collection instantly.
+// multi-hundred (or multi-thousand) item collection still takes real wall-clock time to
+// re-page from scratch on every single visit. Caching the last successful load means a
+// same-session (or same-day) reopen — including a full page reload/navigation, not just an
+// in-app tab switch — can skip the network entirely and show the collection instantly.
+//
+// This is IndexedDB rather than localStorage on purpose. localStorage caps out around 5-10MB
+// per origin depending on the browser, and a real collection in the thousands-of-releases
+// range (cover art URLs, artist/label/format text, etc. per item) lands right around or past
+// that ceiling — so the write was silently failing for exactly the people with the biggest,
+// slowest-to-rebuild collections, i.e. the ones this cache matters most for. IndexedDB's quota
+// is in the hundreds of MB to GB range, so it doesn't hit that wall.
 const COLLECTION_CACHE_VERSION = "v1";
-const COLLECTION_CACHE_TTL_MS = 30 * 60 * 1000; // 30 min — long enough to make reopens instant, short enough that new adds to the collection don't go stale for long.
+const COLLECTION_CACHE_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours — "Sync now" is always right there for a manual refresh, so it's fine to let a passive reopen ride on a same-day cache instead of re-paging.
+const COLLECTION_DB_NAME = "discogs-randomizer-cache";
+const COLLECTION_DB_VERSION = 1;
+const COLLECTION_STORE_NAME = "collections";
 
 function collectionCacheKey(type, username) {
   return `discogs-collection-cache:${COLLECTION_CACHE_VERSION}:${type}:${username.toLowerCase()}`;
 }
 
-function readCollectionCache(type, username) {
+function openCollectionDB() {
+  return new Promise((resolve, reject) => {
+    if (!window.indexedDB) {
+      reject(new Error("IndexedDB unavailable"));
+      return;
+    }
+    const request = window.indexedDB.open(COLLECTION_DB_NAME, COLLECTION_DB_VERSION);
+    request.onupgradeneeded = () => {
+      if (!request.result.objectStoreNames.contains(COLLECTION_STORE_NAME)) {
+        request.result.createObjectStore(COLLECTION_STORE_NAME);
+      }
+    };
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error || new Error("Couldn't open the local cache database."));
+  });
+}
+
+async function readCollectionCache(type, username) {
   try {
-    const raw = window.localStorage.getItem(collectionCacheKey(type, username));
-    if (!raw) return null;
-    const parsed = JSON.parse(raw);
+    const db = await openCollectionDB();
+    const parsed = await new Promise((resolve, reject) => {
+      const tx = db.transaction(COLLECTION_STORE_NAME, "readonly");
+      const req = tx.objectStore(COLLECTION_STORE_NAME).get(collectionCacheKey(type, username));
+      req.onsuccess = () => resolve(req.result || null);
+      req.onerror = () => reject(req.error);
+    });
+    db.close();
     if (!parsed || !Array.isArray(parsed.items) || typeof parsed.timestamp !== "number") return null;
     if (Date.now() - parsed.timestamp > COLLECTION_CACHE_TTL_MS) return null;
     return parsed;
   } catch {
-    return null; // corrupted entry, localStorage unavailable (private browsing), etc. — just skip caching
+    return null; // corrupted entry, IndexedDB unavailable (private browsing in some browsers), etc. — just skip caching
   }
 }
 
-function writeCollectionCache(type, username, items) {
+async function writeCollectionCache(type, username, items) {
   try {
-    window.localStorage.setItem(collectionCacheKey(type, username), JSON.stringify({ items, timestamp: Date.now() }));
+    const db = await openCollectionDB();
+    await new Promise((resolve, reject) => {
+      const tx = db.transaction(COLLECTION_STORE_NAME, "readwrite");
+      tx.objectStore(COLLECTION_STORE_NAME).put({ items, timestamp: Date.now() }, collectionCacheKey(type, username));
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+    });
+    db.close();
   } catch {
-    // Quota exceeded (a big collection's cover art URLs etc. add up) or storage unavailable —
-    // caching is a nice-to-have, not load-bearing, so fail silently rather than surfacing an error.
+    // Storage unavailable (private browsing, disabled storage, etc.) — caching is a
+    // nice-to-have, not load-bearing, so fail silently rather than surfacing an error.
   }
 }
 
-function clearCollectionCache(type, username) {
+async function clearCollectionCache(type, username) {
   try {
-    window.localStorage.removeItem(collectionCacheKey(type, username));
+    const db = await openCollectionDB();
+    await new Promise((resolve, reject) => {
+      const tx = db.transaction(COLLECTION_STORE_NAME, "readwrite");
+      tx.objectStore(COLLECTION_STORE_NAME).delete(collectionCacheKey(type, username));
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+    });
+    db.close();
   } catch {
     // no-op
   }
@@ -1182,7 +1229,7 @@ function CollectionBar({ collectionSource, setCollectionSource, collectionItems,
       setError("");
 
       if (!forceRefresh) {
-        const cached = readCollectionCache("private", username);
+        const cached = await readCollectionCache("private", username);
         if (cached) {
           setCollectionSource({ username, private: true });
           setCollectionItems(cached.items);
@@ -1215,7 +1262,7 @@ function CollectionBar({ collectionSource, setCollectionSource, collectionItems,
         if (controller.signal.aborted) return;
         setCollectionSource({ username, private: true });
         setCollectionItems(items);
-        writeCollectionCache("private", username, items);
+        await writeCollectionCache("private", username, items);
         setLoading(false);
         pendingLoadRef.current = null;
         partialLoadRef.current = null;
@@ -1289,7 +1336,7 @@ function CollectionBar({ collectionSource, setCollectionSource, collectionItems,
     setError("");
 
     if (!forceRefresh) {
-      const cached = readCollectionCache("public", username);
+      const cached = await readCollectionCache("public", username);
       if (cached) {
         setCollectionSource({ username, private: false });
         setCollectionItems(cached.items);
@@ -1329,7 +1376,7 @@ function CollectionBar({ collectionSource, setCollectionSource, collectionItems,
       }
       setCollectionSource({ username, private: false });
       setCollectionItems(items);
-      writeCollectionCache("public", username, items);
+      await writeCollectionCache("public", username, items);
       setLoading(false);
       pendingLoadRef.current = null;
       partialLoadRef.current = null;
@@ -1352,7 +1399,7 @@ function CollectionBar({ collectionSource, setCollectionSource, collectionItems,
     pendingLoadRef.current = null;
     partialLoadRef.current = null;
     if (collectionSource?.private) {
-      clearCollectionCache("private", collectionSource.username);
+      await clearCollectionCache("private", collectionSource.username);
       try {
         await fetch("/api/auth-logout", { method: "POST" });
       } catch {
