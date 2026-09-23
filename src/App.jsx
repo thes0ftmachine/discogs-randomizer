@@ -1492,6 +1492,21 @@ function DiscoverTab({ collectionSource, collectionItems }) {
   // Search uses for its write actions.
   const loggedIn = collectionSource?.private === true;
 
+  // Same three-way scope as Search: 'in' draws only from the connected collection (the
+  // original, only behavior this tab had), 'out' draws from the live catalog with owned
+  // releases excluded, 'both' draws from the live catalog without excluding them. Only
+  // meaningful once a collection is connected.
+  const [scope, setScope] = useState("in"); // 'in' | 'out' | 'both'
+  const ownedIds = useMemo(
+    () => new Set((collectionItems || []).map((it) => it.basic_information?.id).filter(Boolean)),
+    [collectionItems]
+  );
+  // Reset to the default scope on every new connection so switching collections (or logging
+  // out and back in) doesn't leave a stale "outside"/"both" choice from before.
+  useEffect(() => {
+    setScope("in");
+  }, [collectionSource?.username]);
+
   const formRef = useRef(null);
   const resultRef = useRef(null);
   const statusRef = useRef(null);
@@ -1587,7 +1602,7 @@ function DiscoverTab({ collectionSource, collectionItems }) {
       const needsRatingCheck = minRating > 0;
       const needsDetailForSelection = needsRatingCheck || onlyArtwork || !!extraCheck;
       const maxAttempts = 10;
-      const inCollectionMode = !!(collectionItems && collectionItems.length);
+      const inCollectionMode = scope === "in" && !!(collectionItems && collectionItems.length);
 
       let found = null;
       let foundDetail = null;
@@ -1647,6 +1662,14 @@ function DiscoverTab({ collectionSource, collectionItems }) {
             continue; // transient hiccup on the search itself — retry rather than failing outright
           }
           if (!candidates.length) break; // Discogs genuinely has zero matches for these filters
+
+          // "Outside collection" means outside — Discogs' search can't exclude owned
+          // releases itself, so drop them from this page before treating it as a page of
+          // real candidates. "Both" leaves them in on purpose.
+          if (scope === "out" && ownedIds.size) {
+            candidates = candidates.filter((c) => !ownedIds.has(c.id));
+            if (!candidates.length) continue;
+          }
           anyResultsAtAll = true;
 
           if (needsClientFormatCheck) {
@@ -1803,11 +1826,46 @@ function DiscoverTab({ collectionSource, collectionItems }) {
   const ratingInfo = detail?.community?.rating;
   const hasResultContext = !!result;
   const releaseUrl = result ? "https://www.discogs.com" + (result.uri || "") : "";
+  const inCollectionModeForRender = !!collectionSource && scope === "in";
 
   return (
     <>
+      {collectionSource && (
+        <div style={styles.scopeToggleRow} role="group" aria-label="Discover scope">
+          <button
+            type="button"
+            style={{ ...styles.scopeToggleButton, ...(scope === "in" ? styles.scopeToggleButtonActive : {}) }}
+            onClick={() => setScope("in")}
+          >
+            In collection
+          </button>
+          <button
+            type="button"
+            style={{ ...styles.scopeToggleButton, ...(scope === "out" ? styles.scopeToggleButtonActive : {}) }}
+            onClick={() => setScope("out")}
+          >
+            Outside collection
+          </button>
+          <button
+            type="button"
+            style={{ ...styles.scopeToggleButton, ...(scope === "both" ? styles.scopeToggleButtonActive : {}) }}
+            onClick={() => setScope("both")}
+          >
+            Both
+          </button>
+        </div>
+      )}
+
       <div style={styles.form} ref={formRef}>
-        <p style={styles.formHeading}>{collectionSource ? `Find me… (from ${collectionSource.username}'s collection)` : "Find me…"}</p>
+        <p style={styles.formHeading}>
+          {!collectionSource
+            ? "Find me…"
+            : scope === "in"
+              ? `Find me… (from ${collectionSource.username}'s collection)`
+              : scope === "out"
+                ? `Find me… (outside ${collectionSource.username}'s collection)`
+                : `Find me… (catalog + ${collectionSource.username}'s collection)`}
+        </p>
 
         <div style={styles.fieldRow}>
           <label style={styles.label}>Genre</label>
@@ -1853,13 +1911,13 @@ function DiscoverTab({ collectionSource, collectionItems }) {
 
         <div style={styles.fieldRow}>
           <label style={styles.label}>Country of release</label>
-          <select style={styles.select} value={country} onChange={(e) => setCountry(e.target.value)} disabled={!!collectionSource}>
+          <select style={styles.select} value={country} onChange={(e) => setCountry(e.target.value)} disabled={inCollectionModeForRender}>
             {COUNTRIES.map((c) => (
               <option key={c} value={c}>{c}</option>
             ))}
           </select>
-          {collectionSource ? (
-            <p style={styles.hintText}>Discogs doesn't expose pressing country on collection data, so this filter is off while a collection is connected.</p>
+          {inCollectionModeForRender ? (
+            <p style={styles.hintText}>Discogs doesn't expose pressing country on collection data, so this filter is off while browsing the connected collection.</p>
           ) : (
             <p style={styles.hintText}>This is the country the pressing was released in — not the artist's nationality.</p>
           )}
@@ -1993,7 +2051,9 @@ function DiscoverTab({ collectionSource, collectionItems }) {
                     )}
                   </p>
                 )}
-                {loggedIn && <WantlistButton releaseId={result.id} />}
+                {loggedIn && !inCollectionModeForRender && !ownedIds.has(result.id) && (
+                  <WantlistButton releaseId={result.id} />
+                )}
               </div>
             )}
 
