@@ -756,10 +756,14 @@ async function fetchCollectionPage(params, signal, maxAttempts = 6) {
   throw lastError || new Error("Couldn't load that page of the collection.");
 }
 
-async function fetchFullCollection({ username, useAuth = false } = {}, signal, onProgress) {
-  let page = 1;
+// resumeItems/resumePage let a caller pick a paginated load back up where a prior attempt
+// left off (e.g. it got aborted when the tab was backgrounded), instead of re-paging a large
+// collection from page 1 every time. onProgress is handed the running items array itself
+// (not just its length) after every page so the caller can stash it for a future resume.
+async function fetchFullCollection({ username, useAuth = false, resumeItems, resumePage } = {}, signal, onProgress) {
+  let page = resumePage && resumePage > 1 ? resumePage : 1;
   let pages = 1;
-  const items = [];
+  const items = Array.isArray(resumeItems) ? resumeItems.slice() : [];
   do {
     const params = useAuth
       ? { kind: "my-collection", page: String(page), per_page: String(COLLECTION_PER_PAGE) }
@@ -768,8 +772,8 @@ async function fetchFullCollection({ username, useAuth = false } = {}, signal, o
     const data = await fetchCollectionPage(params, signal);
     pages = data?.pagination?.pages || 1;
     items.push(...(data?.releases || []));
-    onProgress?.(items.length, data?.pagination?.items || items.length);
     page++;
+    onProgress?.(items.length, data?.pagination?.items || items.length, page, items);
 
     if (page <= pages && !signal?.aborted) {
       // Stay ahead of the throttle rather than reacting to it: always leave at least
@@ -1164,6 +1168,12 @@ function CollectionBar({ collectionSource, setCollectionSource, collectionItems,
   // Tracks what the in-flight request is for, so a visibilitychange handler firing later
   // knows whether (and how) to resume it.
   const pendingLoadRef = useRef(null); // { type: "private", username } | { type: "public", username } | null
+  // Snapshot of whatever pages a load has fetched so far, keyed by "type:username". Getting
+  // backgrounded mid-load aborts the in-flight request (see the visibilitychange handler
+  // below) but this survives that, so resuming re-enters fetchFullCollection at the next
+  // unfetched page with the already-fetched items intact, instead of re-paging a large
+  // collection from page 1 every time you step away for a few seconds mid-sync.
+  const partialLoadRef = useRef(null); // { key, items, nextPage } | null
 
   const loadPrivateCollection = useCallback(
     async (username, { forceRefresh = false } = {}) => {
@@ -1179,18 +1189,28 @@ function CollectionBar({ collectionSource, setCollectionSource, collectionItems,
           setLoading(false);
           setProgress(null);
           pendingLoadRef.current = null;
+          partialLoadRef.current = null;
           return;
         }
       }
 
+      const key = `private:${username}`;
+      const partial = !forceRefresh && partialLoadRef.current?.key === key ? partialLoadRef.current : null;
+      if (forceRefresh) partialLoadRef.current = null;
+
       const controller = new AbortController();
       requestRef.current = controller;
       setLoading(true);
-      setProgress(null);
-      setCollectionItems(null);
+      setProgress(partial ? { loaded: partial.items.length, total: null } : null);
+      setCollectionItems(partial ? partial.items : null);
       try {
-        const items = await fetchFullCollection({ useAuth: true }, controller.signal, (loaded, total) =>
-          setProgress({ loaded, total })
+        const items = await fetchFullCollection(
+          { useAuth: true, resumeItems: partial?.items, resumePage: partial?.nextPage },
+          controller.signal,
+          (loaded, total, nextPage, itemsSoFar) => {
+            setProgress({ loaded, total });
+            partialLoadRef.current = { key, items: itemsSoFar, nextPage };
+          }
         );
         if (controller.signal.aborted) return;
         setCollectionSource({ username, private: true });
@@ -1198,8 +1218,9 @@ function CollectionBar({ collectionSource, setCollectionSource, collectionItems,
         writeCollectionCache("private", username, items);
         setLoading(false);
         pendingLoadRef.current = null;
+        partialLoadRef.current = null;
       } catch (e) {
-        if (e.name === "AbortError") return;
+        if (e.name === "AbortError") return; // partialLoadRef keeps whatever we had — next call resumes from there
         setError(
           e.name === "TimeoutError"
             ? "Discogs stopped responding while loading your collection (this can happen on a spotty mobile connection). Tap Retry."
@@ -1207,6 +1228,7 @@ function CollectionBar({ collectionSource, setCollectionSource, collectionItems,
         );
         setLoading(false);
         pendingLoadRef.current = null;
+        partialLoadRef.current = null;
       }
     },
     [setCollectionSource, setCollectionItems, setError, setLoading]
@@ -1274,24 +1296,35 @@ function CollectionBar({ collectionSource, setCollectionSource, collectionItems,
         setLoading(false);
         setProgress(null);
         pendingLoadRef.current = null;
+        partialLoadRef.current = null;
         return;
       }
     }
 
+    const key = `public:${username}`;
+    const partial = !forceRefresh && partialLoadRef.current?.key === key ? partialLoadRef.current : null;
+    if (forceRefresh) partialLoadRef.current = null;
+
     const controller = new AbortController();
     requestRef.current = controller;
     setLoading(true);
-    setProgress(null);
-    setCollectionItems(null);
+    setProgress(partial ? { loaded: partial.items.length, total: null } : null);
+    setCollectionItems(partial ? partial.items : null);
     try {
-      const items = await fetchFullCollection({ username }, controller.signal, (loaded, total) =>
-        setProgress({ loaded, total })
+      const items = await fetchFullCollection(
+        { username, resumeItems: partial?.items, resumePage: partial?.nextPage },
+        controller.signal,
+        (loaded, total, nextPage, itemsSoFar) => {
+          setProgress({ loaded, total });
+          partialLoadRef.current = { key, items: itemsSoFar, nextPage };
+        }
       );
       if (controller.signal.aborted) return;
       if (items.length === 0) {
         setError("That collection came back empty — double check the username, or that the collection isn't empty.");
         setLoading(false);
         pendingLoadRef.current = null;
+        partialLoadRef.current = null;
         return;
       }
       setCollectionSource({ username, private: false });
@@ -1299,8 +1332,9 @@ function CollectionBar({ collectionSource, setCollectionSource, collectionItems,
       writeCollectionCache("public", username, items);
       setLoading(false);
       pendingLoadRef.current = null;
+      partialLoadRef.current = null;
     } catch (e) {
-      if (e.name === "AbortError") return;
+      if (e.name === "AbortError") return; // partialLoadRef keeps whatever we had — next call resumes from there
       setError(
         e.name === "TimeoutError"
           ? "Discogs stopped responding while loading that collection. Tap Connect to retry."
@@ -1308,6 +1342,7 @@ function CollectionBar({ collectionSource, setCollectionSource, collectionItems,
       );
       setLoading(false);
       pendingLoadRef.current = null;
+      partialLoadRef.current = null;
     }
   }
   connectPublicRef.current = connectPublic;
@@ -1315,6 +1350,7 @@ function CollectionBar({ collectionSource, setCollectionSource, collectionItems,
   async function disconnect() {
     requestRef.current?.abort();
     pendingLoadRef.current = null;
+    partialLoadRef.current = null;
     if (collectionSource?.private) {
       clearCollectionCache("private", collectionSource.username);
       try {
