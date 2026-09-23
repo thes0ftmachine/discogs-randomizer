@@ -1420,6 +1420,54 @@ function TracklistToggle({ tracklist, videos }) {
   );
 }
 
+// A compact "+" button next to the artist name on a random draw, for adding straight to
+// the logged-in person's wantlist without leaving the card. Lives inside the result card's
+// key={result.id} wrapper (like TracklistToggle) so it resets to idle on every new draw
+// rather than showing "✓ Added" for whatever record happened to be up before.
+function WantlistButton({ releaseId }) {
+  const { styles } = useContext(PaletteContext);
+  const [state, setState] = useState("idle"); // idle | loading | done | error
+  const [errorMsg, setErrorMsg] = useState("");
+
+  async function handleClick() {
+    if (state === "loading" || state === "done") return;
+    setState("loading");
+    setErrorMsg("");
+    try {
+      await addToDiscogs("wantlist", releaseId);
+      setState("done");
+    } catch (e) {
+      setState("error");
+      setErrorMsg(e.message || "That didn't go through.");
+    }
+  }
+
+  const label = state === "loading" ? "…" : state === "done" ? "✓" : state === "error" ? "!" : "+";
+  const title =
+    state === "done"
+      ? "Added to your wantlist"
+      : state === "error"
+        ? `Couldn't add to wantlist — tap to retry. (${errorMsg})`
+        : "Add to wantlist";
+
+  return (
+    <button
+      type="button"
+      style={{
+        ...styles.wantlistButton,
+        ...(state === "done" ? styles.wantlistButtonDone : {}),
+        ...(state === "error" ? styles.wantlistButtonError : {}),
+      }}
+      onClick={handleClick}
+      disabled={state === "loading" || state === "done"}
+      title={title}
+      aria-label={title}
+    >
+      {label}
+    </button>
+  );
+}
+
 function DiscoverTab({ collectionSource, collectionItems }) {
   const { palette: PALETTE, styles } = useContext(PaletteContext);
   const [genre, setGenre] = useState("Any Genre");
@@ -1439,6 +1487,10 @@ function DiscoverTab({ collectionSource, collectionItems }) {
   const [history, setHistory] = useState([]);
   const [modeNotice, setModeNotice] = useState("");
   const [imageIndex, setImageIndex] = useState(0);
+
+  // Only true when the connected collection is the logged-in person's own — same signal
+  // Search uses for its write actions.
+  const loggedIn = collectionSource?.private === true;
 
   const formRef = useRef(null);
   const resultRef = useRef(null);
@@ -1914,30 +1966,35 @@ function DiscoverTab({ collectionSource, collectionItems }) {
             <h2 style={styles.cardTitle}>
               <a href={releaseUrl} target="_blank" rel="noreferrer" style={styles.titleLink}>{title}</a>
             </h2>
-            {artist && (
-              <p style={styles.cardArtist}>
-                {detail?.artists?.length ? (
-                  detail.artists.map((a, i) => (
-                    <React.Fragment key={a.id ?? a.name}>
-                      {i > 0 && ", "}
-                      {a.id ? (
-                        <a
-                          href={`https://www.discogs.com/artist/${a.id}`}
-                          target="_blank"
-                          rel="noreferrer"
-                          style={styles.artistLink}
-                        >
-                          {a.name}
-                        </a>
-                      ) : (
-                        a.name
-                      )}
-                    </React.Fragment>
-                  ))
-                ) : (
-                  artist
+            {(artist || loggedIn) && (
+              <div style={styles.cardArtistRow}>
+                {artist && (
+                  <p style={styles.cardArtist}>
+                    {detail?.artists?.length ? (
+                      detail.artists.map((a, i) => (
+                        <React.Fragment key={a.id ?? a.name}>
+                          {i > 0 && ", "}
+                          {a.id ? (
+                            <a
+                              href={`https://www.discogs.com/artist/${a.id}`}
+                              target="_blank"
+                              rel="noreferrer"
+                              style={styles.artistLink}
+                            >
+                              {a.name}
+                            </a>
+                          ) : (
+                            a.name
+                          )}
+                        </React.Fragment>
+                      ))
+                    ) : (
+                      artist
+                    )}
+                  </p>
                 )}
-              </p>
+                {loggedIn && <WantlistButton releaseId={result.id} />}
+              </div>
             )}
 
             <p style={styles.cardSubline}>
@@ -3794,6 +3851,25 @@ function buildStyles(PALETTE) {
   cardTitle: { fontSize: 21, fontWeight: 800, margin: "0 0 2px", letterSpacing: -0.2 },
   titleLink: { color: "inherit", textDecoration: "none" },
   cardArtist: { fontSize: 15, fontWeight: 600, color: PALETTE.accentDark, margin: "0 0 6px" },
+  cardArtistRow: { display: "flex", alignItems: "center", gap: 8, marginBottom: 2 },
+  wantlistButton: {
+    marginLeft: "auto",
+    marginBottom: 6,
+    flexShrink: 0,
+    width: 26,
+    height: 26,
+    borderRadius: 999,
+    border: `1px solid ${PALETTE.accentDark}`,
+    background: PALETTE.card,
+    color: PALETTE.accentDark,
+    fontSize: 14,
+    fontWeight: 700,
+    lineHeight: "24px",
+    textAlign: "center",
+    cursor: "pointer",
+  },
+  wantlistButtonDone: { background: PALETTE.accentDark, color: "#fff" },
+  wantlistButtonError: { borderColor: PALETTE.danger, color: PALETTE.danger },
   artistLink: { color: "inherit", textDecoration: "none" },
   cardSubline: { fontSize: 13, color: PALETTE.muted, margin: "0 0 12px" },
   metaRow: { display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 10 },
