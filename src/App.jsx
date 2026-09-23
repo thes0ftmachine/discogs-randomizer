@@ -593,6 +593,21 @@ async function discogsFetchDetail(resourceUrl, signal) {
   return detail;
 }
 
+// Adds a release to the logged-in person's own Discogs collection (Uncategorized folder) or
+// wantlist. Only meaningful when they're logged in — the proxy checks the session itself, so
+// this surfaces that as a normal thrown error rather than assuming the caller already knows.
+async function addToDiscogs(action, releaseId, signal) {
+  const res = await fetch("/api/collection-write", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ action, releaseId }),
+    signal,
+  });
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(body.error || `That didn't go through (${res.status}).`);
+  return body;
+}
+
 // Callers pass exclusions in whatever shape is convenient — a Set of seen ids, a single id,
 // or nothing at all. Normalizing here means a bare id or a null can't blow up the filter below.
 function toIdSet(excluded) {
@@ -2075,12 +2090,40 @@ function isAnyFilterActive(f) {
   return (f.genre && f.genre !== "Any Genre") || !!f.style || (f.format && f.format !== "Any Format");
 }
 
+// Shared by scope "in" (collection-only) and "both" (collection preview + live catalog):
+// every connected-collection item that matches the current text query and filters, sorted
+// the same way collection-scoped search always has.
+function collectionMatches(items, q, sort, filters) {
+  const needle = q.trim().toLowerCase();
+  const matches = (items || [])
+    .map(collectionItemToPick)
+    .filter((p) => p.id)
+    .filter((p) => [p.title, ...(p.label || [])].join(" ").toLowerCase().includes(needle))
+    .filter((p) =>
+      collectionPickMatchesFilters(p, {
+        genre: filters.genre,
+        style: filters.style,
+        decade: "Any Decade",
+        formats: filters.format && filters.format !== "Any Format" ? [filters.format] : [],
+      })
+    );
+  return sortCollectionMatches(matches, sort);
+}
+
+const BOTH_MODE_PREVIEW_COUNT = 5;
+
 function SearchTab({ collectionSource, collectionItems }) {
   const { styles } = useContext(PaletteContext);
   const [query, setQuery] = useState("");
   const [submittedQuery, setSubmittedQuery] = useState("");
   const [releasesOnly, setReleasesOnly] = useState(true);
   const [sortMode, setSortMode] = useState("relevance");
+  // Only meaningful once a collection is connected — "in" mirrors the old behavior (search
+  // scoped entirely to the connected collection). "out" and "both" both hit the live Discogs
+  // catalog, so they carry a real network search and the releases-only/sort controls apply.
+  const [scope, setScope] = useState("in"); // 'in' | 'out' | 'both'
+  const [collectionPreview, setCollectionPreview] = useState([]); // 'both' mode only: top few in-collection matches
+  const [collectionPreviewTotal, setCollectionPreviewTotal] = useState(0);
   const [filterGenre, setFilterGenre] = useState("Any Genre");
   const [filterStyle, setFilterStyle] = useState("");
   const [filterFormat, setFilterFormat] = useState("Any Format");
@@ -2100,34 +2143,31 @@ function SearchTab({ collectionSource, collectionItems }) {
   const requestRef = useRef(null);
   const detailRequestRef = useRef(null);
   const filterStyleOptions = useMemo(() => GENRE_STYLES[filterGenre] || [], [filterGenre]);
+  // Only true when the connected collection is the logged-in person's own — write actions
+  // (adding to collection/wantlist) only make sense against your own Discogs account.
+  const loggedIn = collectionSource?.private === true;
+  const ownedIds = useMemo(
+    () => new Set((collectionItems || []).map((it) => it.basic_information?.id).filter(Boolean)),
+    [collectionItems]
+  );
 
-  const runSearch = useCallback(async (q, pageNum, only, sort, source, items, filters) => {
+  const runSearch = useCallback(async (q, pageNum, only, sort, source, items, filters, scopeArg) => {
+    const effectiveScope = source ? scopeArg : "out";
     // A blank query is only valid when there's something else doing the narrowing — a
     // connected collection to browse, or a genre/style/format filter set.
     if (!q.trim() && !source && !isAnyFilterActive(filters)) return;
     requestRef.current?.abort();
 
-    if (source) {
+    if (effectiveScope === "in") {
       // Collection-scoped: everything's already cached, so this is just a synchronous
       // filter + sort + slice, no network call and no "releases only" toggle to apply
       // (collection releases are, well, always releases). A blank query matches everything,
       // which is what makes this double as a browse-the-whole-collection mode.
       setLoading(true);
       setError("");
-      const needle = q.trim().toLowerCase();
-      const matches = (items || [])
-        .map(collectionItemToPick)
-        .filter((p) => p.id)
-        .filter((p) => [p.title, ...(p.label || [])].join(" ").toLowerCase().includes(needle))
-        .filter((p) =>
-          collectionPickMatchesFilters(p, {
-            genre: filters.genre,
-            style: filters.style,
-            decade: "Any Decade",
-            formats: filters.format && filters.format !== "Any Format" ? [filters.format] : [],
-          })
-        );
-      const sorted = sortCollectionMatches(matches, sort);
+      setCollectionPreview([]);
+      setCollectionPreviewTotal(0);
+      const sorted = collectionMatches(items, q, sort, filters);
       const perPage = SEARCH_RESULTS_PER_PAGE;
       const totalPages = Math.max(1, Math.ceil(sorted.length / perPage));
       const clampedPage = Math.min(Math.max(pageNum, 1), totalPages);
@@ -2136,6 +2176,21 @@ function SearchTab({ collectionSource, collectionItems }) {
       setPagination({ page: clampedPage, pages: totalPages, items: sorted.length });
       setLoading(false);
       return;
+    }
+
+    // "out" and "both" both hit the live catalog, and both need to know what's already in
+    // the collection — "out" to hide it from the results, "both" for the preview strip above them.
+    const collectionIdSet = source
+      ? new Set((items || []).map((it) => it.basic_information?.id).filter(Boolean))
+      : null;
+
+    if (effectiveScope === "both") {
+      const sorted = collectionMatches(items, q, sort, filters);
+      setCollectionPreview(sorted.slice(0, BOTH_MODE_PREVIEW_COUNT));
+      setCollectionPreviewTotal(sorted.length);
+    } else {
+      setCollectionPreview([]);
+      setCollectionPreviewTotal(0);
     }
 
     const controller = new AbortController();
@@ -2158,7 +2213,13 @@ function SearchTab({ collectionSource, collectionItems }) {
       if (filters.format && filters.format !== "Any Format") params.format = filters.format;
       const data = await discogsFetch(params, controller.signal);
       if (controller.signal.aborted) return;
-      setResults(data?.results || []);
+      // Discogs' search can't exclude "things I already own" itself, so this filters the
+      // page we got back rather than the query — a page can come back short of per_page as
+      // a result, an acceptable tradeoff for "don't show records I already have" over
+      // trying to backfill from the next page.
+      const raw = data?.results || [];
+      const filtered = collectionIdSet ? raw.filter((r) => !collectionIdSet.has(r.id)) : raw;
+      setResults(filtered);
       setPagination(data?.pagination || null);
     } catch (e) {
       if (e.name === "AbortError") return;
@@ -2178,6 +2239,9 @@ function SearchTab({ collectionSource, collectionItems }) {
   const currentFilters = () => ({ genre: filterGenre, style: filterStyle, format: filterFormat });
 
   useEffect(() => {
+    // Reset to the default scope on every new connection so switching collections (or
+    // logging out and back in) doesn't leave a stale "outside"/"both" choice from before.
+    setScope("in");
     if (!hasSearched) return;
     if (!submittedQuery.trim() && !collectionSource && !isAnyFilterActive(currentFilters())) {
       setHasSearched(false);
@@ -2186,7 +2250,7 @@ function SearchTab({ collectionSource, collectionItems }) {
       return;
     }
     setPage(1);
-    runSearch(submittedQuery, 1, releasesOnly, sortMode, collectionSource, collectionItems, currentFilters());
+    runSearch(submittedQuery, 1, releasesOnly, sortMode, collectionSource, collectionItems, currentFilters(), "in");
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [collectionKey]);
 
@@ -2199,13 +2263,22 @@ function SearchTab({ collectionSource, collectionItems }) {
     setSubmittedQuery(q);
     setHasSearched(true);
     setPage(1);
-    runSearch(q, 1, releasesOnly, sortMode, collectionSource, collectionItems, filters);
+    runSearch(q, 1, releasesOnly, sortMode, collectionSource, collectionItems, filters, scope);
   }
 
   function changePage(next) {
     if (!hasSearched || next < 1) return;
     setPage(next);
-    runSearch(submittedQuery, next, releasesOnly, sortMode, collectionSource, collectionItems, currentFilters());
+    runSearch(submittedQuery, next, releasesOnly, sortMode, collectionSource, collectionItems, currentFilters(), scope);
+  }
+
+  function changeScope(next) {
+    if (next === scope) return;
+    setScope(next);
+    if (hasSearched) {
+      setPage(1);
+      runSearch(submittedQuery, 1, releasesOnly, sortMode, collectionSource, collectionItems, currentFilters(), next);
+    }
   }
 
   function handleToggleReleasesOnly() {
@@ -2213,7 +2286,7 @@ function SearchTab({ collectionSource, collectionItems }) {
     setReleasesOnly(next);
     if (hasSearched) {
       setPage(1);
-      runSearch(submittedQuery, 1, next, sortMode, collectionSource, collectionItems, currentFilters());
+      runSearch(submittedQuery, 1, next, sortMode, collectionSource, collectionItems, currentFilters(), scope);
     }
   }
 
@@ -2222,7 +2295,7 @@ function SearchTab({ collectionSource, collectionItems }) {
     setSortMode(next);
     if (hasSearched) {
       setPage(1);
-      runSearch(submittedQuery, 1, releasesOnly, next, collectionSource, collectionItems, currentFilters());
+      runSearch(submittedQuery, 1, releasesOnly, next, collectionSource, collectionItems, currentFilters(), scope);
     }
   }
 
@@ -2236,7 +2309,7 @@ function SearchTab({ collectionSource, collectionItems }) {
         genre: nextGenre,
         style: "",
         format: filterFormat,
-      });
+      }, scope);
     }
   }
 
@@ -2249,7 +2322,7 @@ function SearchTab({ collectionSource, collectionItems }) {
         genre: filterGenre,
         style: nextStyle,
         format: filterFormat,
-      });
+      }, scope);
     }
   }
 
@@ -2262,7 +2335,7 @@ function SearchTab({ collectionSource, collectionItems }) {
         genre: filterGenre,
         style: filterStyle,
         format: nextFormat,
-      });
+      }, scope);
     }
   }
 
@@ -2360,9 +2433,39 @@ function SearchTab({ collectionSource, collectionItems }) {
       </div>
 
       {collectionSource && (
-        <p style={styles.modeNotice}>
-          {hasSearched && !submittedQuery.trim() ? "Browsing" : "Searching within"} {collectionSource.username}'s collection ({collectionItems?.length ?? 0} releases).
-        </p>
+        <>
+          <div style={styles.scopeToggleRow} role="group" aria-label="Search scope">
+            <button
+              type="button"
+              style={{ ...styles.scopeToggleButton, ...(scope === "in" ? styles.scopeToggleButtonActive : {}) }}
+              onClick={() => changeScope("in")}
+            >
+              In collection
+            </button>
+            <button
+              type="button"
+              style={{ ...styles.scopeToggleButton, ...(scope === "out" ? styles.scopeToggleButtonActive : {}) }}
+              onClick={() => changeScope("out")}
+            >
+              Outside collection
+            </button>
+            <button
+              type="button"
+              style={{ ...styles.scopeToggleButton, ...(scope === "both" ? styles.scopeToggleButtonActive : {}) }}
+              onClick={() => changeScope("both")}
+            >
+              Both
+            </button>
+          </div>
+          <p style={styles.modeNotice}>
+            {scope === "in" &&
+              `${hasSearched && !submittedQuery.trim() ? "Browsing" : "Searching within"} ${collectionSource.username}'s collection (${collectionItems?.length ?? 0} releases).`}
+            {scope === "out" &&
+              `Searching the Discogs catalog, outside ${collectionSource.username}'s collection (owned releases are hidden).`}
+            {scope === "both" &&
+              `Searching ${collectionSource.username}'s collection and the wider Discogs catalog.`}
+          </p>
+        </>
       )}
 
       <div style={styles.searchControlsRow}>
@@ -2371,7 +2474,7 @@ function SearchTab({ collectionSource, collectionItems }) {
             type="checkbox"
             checked={releasesOnly}
             onChange={handleToggleReleasesOnly}
-            disabled={!!collectionSource}
+            disabled={scope === "in"}
           />
           Releases only (hide masters)
         </label>
@@ -2381,7 +2484,7 @@ function SearchTab({ collectionSource, collectionItems }) {
           ))}
         </select>
       </div>
-      {collectionSource && (
+      {scope === "in" && (
         <p style={styles.hintText}>A connected collection only holds releases, so this filter doesn't apply.</p>
       )}
 
@@ -2402,9 +2505,34 @@ function SearchTab({ collectionSource, collectionItems }) {
 
       {!loading && error && <div style={styles.errorBox}>{error}</div>}
 
+      {!loading && scope === "both" && collectionPreview.length > 0 && (
+        <div style={styles.collectionPreviewBox}>
+          <p style={styles.collectionPreviewTitle}>
+            In your collection {collectionPreviewTotal > BOTH_MODE_PREVIEW_COUNT ? `(${collectionPreviewTotal})` : ""}
+          </p>
+          <div style={styles.collectionPreviewRow}>
+            {collectionPreview.map((p) => (
+              <button
+                type="button"
+                key={`preview-${p.id}`}
+                style={styles.collectionPreviewCard}
+                onClick={() => openResult({ id: p.id, type: "release", title: p.title, cover_image: p.cover_image, year: p.year, format: p.format, uri: p.uri })}
+              >
+                <SmartImage src={p.cover_image} alt={p.title} style={styles.collectionPreviewCover} placeholderStyle={styles.coverPlaceholder} />
+              </button>
+            ))}
+          </div>
+          {collectionPreviewTotal > BOTH_MODE_PREVIEW_COUNT && (
+            <button type="button" style={styles.collectionPreviewMore} onClick={() => changeScope("in")}>
+              See all {collectionPreviewTotal} in collection →
+            </button>
+          )}
+        </div>
+      )}
+
       {!loading && hasSearched && !error && results.length === 0 && (
         <div style={styles.emptyBox}>
-          {collectionSource
+          {scope === "in"
             ? "Nothing in the collection matched that."
             : 'Nothing matched that search. Try a broader term, or turn off "Releases only."'}
         </div>
@@ -2479,6 +2607,8 @@ function SearchTab({ collectionSource, collectionItems }) {
           imageIndex={selectedImageIndex}
           setImageIndex={setSelectedImageIndex}
           onClose={closeModal}
+          loggedIn={loggedIn}
+          alreadyOwned={ownedIds.has(selected.id)}
         />
       )}
     </>
@@ -2618,7 +2748,60 @@ function Tracklist({ tracklist, videos }) {
   );
 }
 
-function SearchResultModal({ result, detail, loading, error, imageIndex, setImageIndex, onClose }) {
+// Buttons to add the open release straight to the logged-in person's own Discogs collection
+// or wantlist. Each button tracks its own idle/loading/done/error state so one succeeding
+// (or failing) doesn't affect the other, and a completed add shows a plain confirmation
+// rather than trying to reflect Discogs' state back with a toggle — this app has no reliable
+// way to know if something was *removed* on Discogs' side since the collection was cached.
+function CollectionActions({ releaseId, alreadyOwned }) {
+  const { styles } = useContext(PaletteContext);
+  const [state, setState] = useState({ collection: "idle", wantlist: "idle" });
+  const [errorMsg, setErrorMsg] = useState({ collection: "", wantlist: "" });
+
+  async function handleAdd(action) {
+    setState((s) => ({ ...s, [action]: "loading" }));
+    setErrorMsg((s) => ({ ...s, [action]: "" }));
+    try {
+      await addToDiscogs(action, releaseId);
+      setState((s) => ({ ...s, [action]: "done" }));
+    } catch (e) {
+      setState((s) => ({ ...s, [action]: "error" }));
+      setErrorMsg((s) => ({ ...s, [action]: e.message || "That didn't go through." }));
+    }
+  }
+
+  function buttonLabel(action, doneLabel, idleLabel) {
+    if (state[action] === "loading") return "Adding…";
+    if (state[action] === "done") return doneLabel;
+    return idleLabel;
+  }
+
+  return (
+    <div style={styles.collectionActionsRow}>
+      <button
+        type="button"
+        style={{ ...styles.collectionActionButton, ...(state.collection === "done" ? styles.collectionActionButtonDone : {}) }}
+        onClick={() => handleAdd("collection")}
+        disabled={state.collection === "loading" || state.collection === "done"}
+      >
+        {alreadyOwned && state.collection === "idle" ? "✓ In your collection" : buttonLabel("collection", "✓ Added", "+ Add to Collection")}
+      </button>
+      <button
+        type="button"
+        style={{ ...styles.collectionActionButton, ...(state.wantlist === "done" ? styles.collectionActionButtonDone : {}) }}
+        onClick={() => handleAdd("wantlist")}
+        disabled={state.wantlist === "loading" || state.wantlist === "done"}
+      >
+        {buttonLabel("wantlist", "✓ Added", "+ Add to Wantlist")}
+      </button>
+      {(errorMsg.collection || errorMsg.wantlist) && (
+        <p style={styles.collectionActionError}>{errorMsg.collection || errorMsg.wantlist}</p>
+      )}
+    </div>
+  );
+}
+
+function SearchResultModal({ result, detail, loading, error, imageIndex, setImageIndex, onClose, loggedIn, alreadyOwned }) {
   const { styles } = useContext(PaletteContext);
   const isMaster = result.type === "master";
   const images = detail?.images || [];
@@ -2673,6 +2856,8 @@ function SearchResultModal({ result, detail, loading, error, imageIndex, setImag
               This is a master release, grouping several pressings — open it on Discogs to see individual versions.
             </p>
           )}
+
+          {loggedIn && !isMaster && <CollectionActions releaseId={result.id} alreadyOwned={alreadyOwned} />}
 
           {(detail?.genres || result.genre || []).length > 0 && (
             <div style={styles.metaRow}>
@@ -3426,6 +3611,46 @@ function buildStyles(PALETTE) {
   },
   gameTabButtonActive: { background: PALETTE.accent, color: "#fff", borderColor: PALETTE.accent },
 
+  scopeToggleRow: { display: "flex", gap: 8, marginTop: 10 },
+  scopeToggleButton: {
+    flex: 1,
+    padding: "7px 8px",
+    borderRadius: 999,
+    border: `1px solid ${PALETTE.muted}`,
+    background: PALETTE.card,
+    fontSize: 12.5,
+    fontWeight: 600,
+    color: PALETTE.muted,
+    cursor: "pointer",
+    outlineColor: PALETTE.accent,
+    outlineOffset: 2,
+  },
+  scopeToggleButtonActive: { background: PALETTE.accent, color: "#fff", borderColor: PALETTE.accent },
+
+  collectionPreviewBox: {
+    border: `1px solid ${PALETTE.border}`,
+    borderRadius: 10,
+    padding: "10px 12px",
+    margin: "10px 0",
+    background: PALETTE.card,
+  },
+  collectionPreviewTitle: { fontSize: 12, fontWeight: 800, textTransform: "uppercase", letterSpacing: 0.4, color: PALETTE.muted, margin: "0 0 8px" },
+  collectionPreviewRow: { display: "flex", gap: 8, overflowX: "auto" },
+  collectionPreviewCard: { border: "none", background: "none", padding: 0, cursor: "pointer", flexShrink: 0 },
+  collectionPreviewCover: { width: 56, height: 56, borderRadius: 6, objectFit: "cover" },
+  collectionPreviewMore: {
+    display: "block",
+    marginTop: 8,
+    border: "none",
+    background: "none",
+    padding: 0,
+    fontSize: 13,
+    fontWeight: 700,
+    color: PALETTE.accentDark,
+    textDecoration: "underline",
+    cursor: "pointer",
+  },
+
   comingSoon: {
     background: PALETTE.card,
     border: `1px dashed ${PALETTE.border}`,
@@ -3606,6 +3831,23 @@ function buildStyles(PALETTE) {
   videoEmbedWrap: { position: "relative", width: "100%", paddingTop: "56.25%", margin: "6px 0 10px", borderRadius: 8, overflow: "hidden", background: "#000" },
   videoEmbed: { position: "absolute", top: 0, left: 0, width: "100%", height: "100%", border: 0 },
   videoFallbackSection: { marginTop: 12 },
+
+  collectionActionsRow: { display: "flex", flexWrap: "wrap", gap: 8, margin: "10px 0" },
+  collectionActionButton: {
+    flex: "1 1 auto",
+    padding: "9px 12px",
+    borderRadius: 8,
+    border: `1px solid ${PALETTE.accentDark}`,
+    background: PALETTE.card,
+    color: PALETTE.accentDark,
+    fontSize: 13,
+    fontWeight: 700,
+    cursor: "pointer",
+    whiteSpace: "nowrap",
+  },
+  collectionActionButtonDone: { background: PALETTE.accentDark, color: "#fff" },
+  collectionActionError: { flexBasis: "100%", fontSize: 12, color: PALETTE.danger || "#c0392b", margin: "2px 0 0" },
+
   historySection: { marginTop: 24 },
   discoveryModeRow: { display: "flex", gap: 8, marginTop: 16, flexWrap: "wrap" },
   modeButton: {
