@@ -1831,7 +1831,7 @@ function DiscoverTab({ collectionSource, collectionItems }) {
   return (
     <>
       {collectionSource && (
-        <div style={styles.scopeToggleRow} role="group" aria-label="Discover scope">
+        <div style={{ ...styles.scopeToggleRow, marginBottom: 16 }} role="group" aria-label="Discover scope">
           <button
             type="button"
             style={{ ...styles.scopeToggleButton, ...(scope === "in" ? styles.scopeToggleButtonActive : {}) }}
