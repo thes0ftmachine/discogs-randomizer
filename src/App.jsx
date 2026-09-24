@@ -2671,7 +2671,21 @@ function SearchTab({ collectionSource, collectionItems, extrasMap }) {
 
   const requestRef = useRef(null);
   const detailRequestRef = useRef(null);
+  const resultsTopRef = useRef(null);
+  const pendingPageScrollRef = useRef(false);
   const filterStyleOptions = useMemo(() => GENRE_STYLES[filterGenre] || [], [filterGenre]);
+
+  // When pagination is used, return the user to the top of the newly loaded result page.
+  // This is intentionally tied only to explicit page changes so searches, filters, and
+  // sort changes don't unexpectedly move the viewport.
+  useEffect(() => {
+    if (!loading && results.length > 0 && pendingPageScrollRef.current) {
+      pendingPageScrollRef.current = false;
+      requestAnimationFrame(() => {
+        resultsTopRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+      });
+    }
+  }, [loading, results]);
   // Only true when the connected collection is the logged-in person's own — write actions
   // (adding to collection/wantlist) only make sense against your own Discogs account.
   const loggedIn = collectionSource?.private === true;
@@ -2940,6 +2954,7 @@ function SearchTab({ collectionSource, collectionItems, extrasMap }) {
 
   function changePage(next) {
     if (!hasSearched || next < 1) return;
+    pendingPageScrollRef.current = true;
     setPage(next);
     runSearch(submittedQuery, next, releasesOnly, sortMode, collectionSource, collectionItems, currentFilters(), scope, extrasMap);
   }
@@ -3227,7 +3242,7 @@ function SearchTab({ collectionSource, collectionItems, extrasMap }) {
 
       {!loading && results.length > 0 && (
         <>
-          <div style={styles.searchGrid} className="discovery-stagger">
+          <div ref={resultsTopRef} style={styles.searchGrid} className="discovery-stagger">
             {results.map((r) => {
               const { artist, title } = splitArtistTitle(r, null);
               const tags = (r.style?.length ? r.style : r.genre) || [];
