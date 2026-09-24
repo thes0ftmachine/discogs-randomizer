@@ -623,8 +623,50 @@ function toIdSet(excluded) {
 // or barcode match. So a query that looks like one of those gets routed to the matching
 // dedicated field instead of `q`; anything else (the overwhelming majority of searches — an
 // artist name, an album title, a phrase with spaces) goes through `q` exactly as before.
+function normalizeBarcode(value) {
+  return String(value || "").replace(/\D/g, "");
+}
+
+// Treat the UPC/EAN digits as the canonical value, but also generate the common Discogs/GS1
+// display forms so equivalent UPC-A and EAN-13 values resolve to the same release.
+function barcodeVariants(q) {
+  const digits = normalizeBarcode(q);
+  const variants = new Set();
+  if (!digits || digits.length < 6 || digits.length > 14) return [];
+  variants.add(digits);
+
+  const addUpcDisplay = (upc) => {
+    if (upc.length !== 12) return;
+    variants.add(upc.slice(0, 1) + " " + upc.slice(1, 6) + " " + upc.slice(6, 11) + " " + upc.slice(11));
+  };
+  const addEanDisplay = (ean) => {
+    if (ean.length !== 13) return;
+    variants.add(ean.slice(0, 1) + " " + ean.slice(1, 7) + " " + ean.slice(7, 12) + " " + ean.slice(12));
+    variants.add(ean.slice(0, 1) + " " + ean.slice(1, 6) + " " + ean.slice(6, 12) + " " + ean.slice(12));
+  };
+
+  if (digits.length === 12) {
+    addUpcDisplay(digits);
+    const ean = "0" + digits;
+    variants.add(ean);
+    addEanDisplay(ean);
+  } else if (digits.length === 13 && digits.startsWith("0")) {
+    const upc = digits.slice(1);
+    variants.add(upc);
+    addUpcDisplay(upc);
+    addEanDisplay(digits);
+  } else if (digits.length === 13) {
+    addEanDisplay(digits);
+  }
+
+  return [...variants];
+}
+
 function looksLikeBarcode(q) {
-  return /^\d{6,14}$/.test(q.trim());
+  const trimmed = q.trim();
+  if (!/^[\d\s]+$/.test(trimmed)) return false;
+  const digits = normalizeBarcode(trimmed);
+  return digits.length >= 6 && digits.length <= 14;
 }
 function looksLikeCatalogNumber(q) {
   const t = q.trim();
@@ -2499,23 +2541,33 @@ function isAnyFilterActive(f) {
 // cache (see useCollectionReleaseEnrichment) has already learned them; anything not enriched
 // yet just won't match on those two until it is.
 function collectionMatches(items, q, sort, filters, extrasMap) {
-  const needle = q.trim().toLowerCase();
+  const rawQuery = q.trim();
+  const needle = rawQuery.toLowerCase();
+  const barcodeQuery = looksLikeBarcode(rawQuery);
+  const normalizedNeedle = normalizeBarcode(rawQuery);
   const matches = (items || [])
     .map((it) => collectionItemToPick(it, extrasMap))
     .filter((p) => p.id)
-    .filter((p) =>
-      [
+    .filter((p) => {
+      const textValues = [
         p.title,
         ...(p.label || []),
         ...(p.catno || []),
         ...(p.genre || []),
         ...(p.style || []),
         p.country || "",
-        ...(p.identifiers || []),
-      ]
-        .join(" ")
-        .toLowerCase()
-        .includes(needle)
+      ];
+      const textMatch = textValues.join(" ").toLowerCase().includes(needle);
+      if (textMatch) return true;
+      if (!barcodeQuery) return (p.identifiers || []).join(" ").toLowerCase().includes(needle);
+      return (p.identifiers || []).some((identifier) => {
+        const normalizedIdentifier = normalizeBarcode(identifier);
+        if (!normalizedIdentifier) return false;
+        if (normalizedIdentifier === normalizedNeedle) return true;
+        if (normalizedNeedle.length === 12 && normalizedIdentifier === "0" + normalizedNeedle) return true;
+        if (normalizedNeedle.length === 13 && normalizedNeedle.startsWith("0") && normalizedIdentifier === normalizedNeedle.slice(1)) return true;
+        return false;
+      });
     )
     .filter((p) =>
       collectionPickMatchesFilters(p, {
@@ -2655,10 +2707,9 @@ function SearchTab({ collectionSource, collectionItems, extrasMap }) {
       if (trimmedQuery) {
         if (looksLikeBarcode(trimmedQuery)) {
           usedStructuredField = true;
-          const variants = [trimmedQuery];
-          if (trimmedQuery.length === 12) variants.push(`0${trimmedQuery}`);
-          else if (trimmedQuery.length === 13 && trimmedQuery.startsWith("0")) variants.push(trimmedQuery.slice(1));
-          for (const barcode of variants) attempts.push({ ...baseParams, type: "release", barcode });
+          for (const barcode of barcodeVariants(trimmedQuery)) {
+            attempts.push({ ...baseParams, type: "release", barcode });
+          }
         } else if (looksLikeCatalogNumber(trimmedQuery)) {
           usedStructuredField = true;
           attempts.push({ ...baseParams, type: "release", catno: trimmedQuery });
