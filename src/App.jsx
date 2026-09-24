@@ -2616,11 +2616,16 @@ function SearchTab({ collectionSource, collectionItems, extrasMap }) {
     setLoading(true);
     setError("");
     try {
-      const params = {
+      const baseParams = {
         page: String(pageNum),
         per_page: String(SEARCH_RESULTS_PER_PAGE),
         ...sortParamsFor(sort),
       };
+      if (only) baseParams.type = "release";
+      if (filters.genre && filters.genre !== "Any Genre") baseParams.genre = filters.genre;
+      if (filters.style) baseParams.style = filters.style;
+      if (filters.format && filters.format !== "Any Format") baseParams.format = filters.format;
+
       // Discogs' search treats an empty q as a literal (and mostly fruitless) filter rather
       // than "no text filter" — only send it when there's actually something to search for,
       // same as Discover never sends q at all for its filter-only queries. A query shaped like
@@ -2628,30 +2633,47 @@ function SearchTab({ collectionSource, collectionItems, extrasMap }) {
       // the general text field, since that's a much more reliable match for an exact code (see
       // looksLikeBarcode/looksLikeCatalogNumber above).
       const trimmedQuery = q.trim();
+      const params = { ...baseParams };
+      let usedStructuredField = false;
       if (trimmedQuery) {
-        if (looksLikeBarcode(trimmedQuery)) params.barcode = trimmedQuery;
-        else if (looksLikeCatalogNumber(trimmedQuery)) params.catno = trimmedQuery;
-        else params.q = trimmedQuery;
+        if (looksLikeBarcode(trimmedQuery) || looksLikeCatalogNumber(trimmedQuery)) {
+          // Barcode and catalog number only ever exist on release-type entries — force that
+          // scope for this attempt regardless of the "Releases only" toggle, since combining
+          // one of these fields with an unscoped (or artist/master-inclusive) type is the kind
+          // of thing that can make Discogs' index come back empty even for a real, correctly
+          // typed code.
+          params.type = "release";
+          if (looksLikeBarcode(trimmedQuery)) params.barcode = trimmedQuery;
+          else params.catno = trimmedQuery;
+          usedStructuredField = true;
+        } else {
+          params.q = trimmedQuery;
+        }
       }
-      if (only) params.type = "release";
-      if (filters.genre && filters.genre !== "Any Genre") params.genre = filters.genre;
-      if (filters.style) params.style = filters.style;
-      if (filters.format && filters.format !== "Any Format") params.format = filters.format;
-      const data = await discogsFetch(params, controller.signal);
-      if (controller.signal.aborted) return;
+
       // Discogs' catno/barcode fields are exact-ish matches against however that field happens
       // to be indexed, and in practice that can miss a real, correctly-typed code (formatting
-      // quirks in Discogs' own data, tokenization on the hyphen, etc.) — whereas the same string
-      // run through the general text field often still finds it. So a structured lookup that
-      // comes back empty gets one retry as a plain q before giving up, rather than trusting the
-      // dedicated field's silence as the final answer.
-      let effectiveData = data;
-      if ((params.catno || params.barcode) && (effectiveData?.pagination?.items || 0) === 0) {
-        const fallbackParams = { ...params };
-        delete fallbackParams.catno;
-        delete fallbackParams.barcode;
-        fallbackParams.q = trimmedQuery;
-        effectiveData = await discogsFetch(fallbackParams, controller.signal);
+      // quirks in Discogs' own data, tokenization on the hyphen, an outright error response for
+      // some combination of params) — whereas the same string run through the general text
+      // field often still finds it, as on discogs.com's own search. So a structured lookup is
+      // wrapped in its own try/catch: a thrown error OR a clean-but-empty response both fall
+      // through to one retry as a plain q against the original (non-forced) type scope, rather
+      // than either one being trusted as the final answer.
+      let effectiveData = null;
+      if (usedStructuredField) {
+        try {
+          effectiveData = await discogsFetch(params, controller.signal);
+        } catch (e) {
+          if (e.name === "AbortError") throw e;
+          effectiveData = null;
+        }
+        if (controller.signal.aborted) return;
+      } else {
+        effectiveData = await discogsFetch(params, controller.signal);
+        if (controller.signal.aborted) return;
+      }
+      if (usedStructuredField && (!effectiveData || (effectiveData.pagination?.items || 0) === 0)) {
+        effectiveData = await discogsFetch({ ...baseParams, q: trimmedQuery }, controller.signal);
         if (controller.signal.aborted) return;
       }
       // Discogs' search can't exclude "things I already own" itself, so this filters the
