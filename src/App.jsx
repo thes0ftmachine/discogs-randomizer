@@ -2313,13 +2313,19 @@ function isAnyFilterActive(f) {
 
 // Shared by scope "in" (collection-only) and "both" (collection preview + live catalog):
 // every connected-collection item that matches the current text query and filters, sorted
-// the same way collection-scoped search always has.
+// the same way collection-scoped search always has. Text matching covers every field the
+// collection endpoint actually gives us per item — title/artist, label, genre, and style —
+// not just title/label, so a query like "dub" or "Blue Note" turns up everything it should.
+// Country isn't in this list: Discogs' collection endpoint doesn't return a country field on
+// its items at all (that's only on the full per-release lookup), so there's nothing to search.
 function collectionMatches(items, q, sort, filters) {
   const needle = q.trim().toLowerCase();
   const matches = (items || [])
     .map(collectionItemToPick)
     .filter((p) => p.id)
-    .filter((p) => [p.title, ...(p.label || [])].join(" ").toLowerCase().includes(needle))
+    .filter((p) =>
+      [p.title, ...(p.label || []), ...(p.genre || []), ...(p.style || [])].join(" ").toLowerCase().includes(needle)
+    )
     .filter((p) =>
       collectionPickMatchesFilters(p, {
         genre: filters.genre,
