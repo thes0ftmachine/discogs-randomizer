@@ -2639,14 +2639,29 @@ function SearchTab({ collectionSource, collectionItems, extrasMap }) {
       if (filters.format && filters.format !== "Any Format") params.format = filters.format;
       const data = await discogsFetch(params, controller.signal);
       if (controller.signal.aborted) return;
+      // Discogs' catno/barcode fields are exact-ish matches against however that field happens
+      // to be indexed, and in practice that can miss a real, correctly-typed code (formatting
+      // quirks in Discogs' own data, tokenization on the hyphen, etc.) — whereas the same string
+      // run through the general text field often still finds it. So a structured lookup that
+      // comes back empty gets one retry as a plain q before giving up, rather than trusting the
+      // dedicated field's silence as the final answer.
+      let effectiveData = data;
+      if ((params.catno || params.barcode) && (effectiveData?.pagination?.items || 0) === 0) {
+        const fallbackParams = { ...params };
+        delete fallbackParams.catno;
+        delete fallbackParams.barcode;
+        fallbackParams.q = trimmedQuery;
+        effectiveData = await discogsFetch(fallbackParams, controller.signal);
+        if (controller.signal.aborted) return;
+      }
       // Discogs' search can't exclude "things I already own" itself, so this filters the
       // page we got back rather than the query — a page can come back short of per_page as
       // a result, an acceptable tradeoff for "don't show records I already have" over
       // trying to backfill from the next page.
-      const raw = data?.results || [];
+      const raw = effectiveData?.results || [];
       const filtered = collectionIdSet ? raw.filter((r) => !collectionIdSet.has(r.id)) : raw;
       setResults(filtered);
-      setPagination(data?.pagination || null);
+      setPagination(effectiveData?.pagination || null);
     } catch (e) {
       if (e.name === "AbortError") return;
       setError(e.message || "That search didn't go through. Try again.");
