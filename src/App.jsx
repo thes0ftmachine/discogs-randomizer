@@ -2768,21 +2768,31 @@ function SearchTab({ collectionSource, collectionItems, extrasMap }) {
       const structuredBaseParams = {
         page: String(pageNum),
         per_page: String(SEARCH_RESULTS_PER_PAGE),
-        ...sortParamsFor(sortMode),
+        ...sortParamsFor(sort),
         type: "release",
       };
 
       const attempts = [];
+      const structuredTextFallbacks = [];
       let usedStructuredField = false;
       if (trimmedQuery) {
         if (looksLikeBarcode(trimmedQuery)) {
           usedStructuredField = true;
-          for (const barcode of barcodeVariants(trimmedQuery)) {
+          const barcodeCandidates = barcodeVariants(trimmedQuery);
+
+          // First use Discogs' dedicated barcode index. If that index is stale or incomplete
+          // for a particular release, we then retry the same representations through q.
+          // Discogs.com's own search can sometimes find identifier text that the dedicated
+          // barcode field does not, so this gives us a second API-side route without scraping
+          // Discogs.com or introducing a third-party barcode service.
+          for (const barcode of barcodeCandidates) {
             attempts.push({ ...structuredBaseParams, barcode });
+            structuredTextFallbacks.push(barcode);
           }
         } else if (looksLikeCatalogNumber(trimmedQuery)) {
           usedStructuredField = true;
           attempts.push({ ...structuredBaseParams, catno: trimmedQuery });
+          structuredTextFallbacks.push(trimmedQuery);
         } else {
           attempts.push({ ...baseParams, q: trimmedQuery });
         }
@@ -2790,17 +2800,24 @@ function SearchTab({ collectionSource, collectionItems, extrasMap }) {
         attempts.push({ ...baseParams });
       }
 
-      // If Discogs' dedicated identifier index does not return anything, make one completely
-      // unfiltered text-search fallback. This avoids accidentally turning an exact identifier
-      // lookup into "identifier + whatever filters happened to be selected in the UI".
+      // If Discogs' dedicated identifier index does not return anything, retry the identifier
+      // through the general text index. This is intentionally still Discogs API-only: we don't
+      // scrape the Discogs website or send the user's barcode to an unrelated lookup service.
+      // For barcodes we try the same UPC/EAN display variants we already generated above.
       if (usedStructuredField) {
-        attempts.push({
-          page: String(pageNum),
-          per_page: String(SEARCH_RESULTS_PER_PAGE),
-          ...sortParamsFor(sortMode),
-          type: "release",
-          q: trimmedQuery,
-        });
+        const seenTextFallbacks = new Set();
+        for (const fallbackQuery of structuredTextFallbacks) {
+          const key = String(fallbackQuery).toLowerCase();
+          if (seenTextFallbacks.has(key)) continue;
+          seenTextFallbacks.add(key);
+          attempts.push({
+            page: String(pageNum),
+            per_page: String(SEARCH_RESULTS_PER_PAGE),
+            ...sortParamsFor(sort),
+            type: "release",
+            q: fallbackQuery,
+          });
+        }
       }
 
       let effectiveData = null;
