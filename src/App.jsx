@@ -2515,6 +2515,46 @@ function sortParamsFor(sortMode) {
   return {};
 }
 
+// Name-search helpers: when a multi-word artist search produces a true artist-name match,
+// also search the final name token so alternate/credited names such as "Pretty Purdie" can
+// appear below true "Bernard Purdie" matches without broadening ordinary title searches.
+function normalizeSearchName(value) {
+  return String(value || "")
+    .toLowerCase()
+    .replace(/[’']/g, "")
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim()
+    .replace(/\s+/g, " ");
+}
+
+function searchResultArtist(result) {
+  const raw = String(result?.title || "");
+  const separator = raw.indexOf(" - ");
+  return separator >= 0 ? raw.slice(0, separator).trim() : "";
+}
+
+function isMultiWordNameQuery(query) {
+  return normalizeSearchName(query).split(" ").filter(Boolean).length >= 2;
+}
+
+function artistNameContainsQuery(artist, query) {
+  const a = normalizeSearchName(artist);
+  const q = normalizeSearchName(query);
+  return !!a && !!q && (a === q || a.includes(q));
+}
+
+function artistNameHasPartialLastToken(artist, query) {
+  const a = normalizeSearchName(artist);
+  const words = normalizeSearchName(query).split(" ").filter(Boolean);
+  if (!a || words.length < 2) return false;
+  const last = words[words.length - 1];
+  return a.split(" ").includes(last) && !artistNameContainsQuery(a, query);
+}
+
+function searchResultMatchesArtistQuery(result, query) {
+  return artistNameContainsQuery(searchResultArtist(result), query);
+}
+
 // Collection-scoped counterpart: when a collection is connected, Search runs entirely
 // client-side against the already-cached collection instead of hitting Discogs' global
 // search. "Best match" has no real relevance signal to sort by here, so it just keeps
@@ -2545,10 +2585,18 @@ function collectionMatches(items, q, sort, filters, extrasMap) {
   const needle = rawQuery.toLowerCase();
   const barcodeQuery = looksLikeBarcode(rawQuery);
   const normalizedNeedle = normalizeBarcode(rawQuery);
-  const matches = (items || [])
+  const nameQuery = isMultiWordNameQuery(rawQuery);
+  const picks = (items || [])
     .map((it) => collectionItemToPick(it, extrasMap))
-    .filter((p) => p.id)
-    .filter((p) => {
+    .filter((p) => p.id);
+
+  // Only broaden a name search when the collection actually contains a true artist-name
+  // match. This keeps ordinary multi-word album/title searches from becoming surname searches.
+  const hasExactNameMatch =
+    nameQuery && picks.some((p) => searchResultMatchesArtistQuery({ title: p.title }, rawQuery));
+
+  const matches = picks
+    .map((p) => {
       const textValues = [
         p.title,
         ...(p.label || []),
@@ -2558,27 +2606,38 @@ function collectionMatches(items, q, sort, filters, extrasMap) {
         p.country || "",
       ];
       const textMatch = textValues.join(" ").toLowerCase().includes(needle);
-      if (textMatch) return true;
-      if (!barcodeQuery) return (p.identifiers || []).join(" ").toLowerCase().includes(needle);
-      return (p.identifiers || []).some((identifier) => {
-        const normalizedIdentifier = normalizeBarcode(identifier);
-        if (!normalizedIdentifier) return false;
-        if (normalizedIdentifier === normalizedNeedle) return true;
-        if (normalizedNeedle.length === 12 && normalizedIdentifier === "0" + normalizedNeedle) return true;
-        if (normalizedNeedle.length === 13 && normalizedNeedle.startsWith("0") && normalizedIdentifier === normalizedNeedle.slice(1)) return true;
-        return false;
-      });
-    )
-    .filter((p) =>
-      collectionPickMatchesFilters(p, {
+      let matched = textMatch;
+      let partialNameMatch = false;
+
+      if (!matched && !barcodeQuery) {
+        matched = (p.identifiers || []).join(" ").toLowerCase().includes(needle);
+      }
+
+      if (!matched && hasExactNameMatch) {
+        partialNameMatch = artistNameHasPartialLastToken(p.title.split(" - ")[0], rawQuery);
+        matched = partialNameMatch;
+      }
+
+      return { p, matched, partialNameMatch };
+    })
+    .filter((entry) => entry.matched)
+    .filter((entry) =>
+      collectionPickMatchesFilters(entry.p, {
         genre: filters.genre,
         style: filters.style,
         decade: "Any Decade",
         formats: filters.format && filters.format !== "Any Format" ? [filters.format] : [],
       })
     );
-  return sortCollectionMatches(matches, sort);
+
+  if (sort === "relevance") {
+    return matches
+      .sort((a, b) => Number(a.partialNameMatch) - Number(b.partialNameMatch))
+      .map((entry) => entry.p);
+  }
+  return sortCollectionMatches(matches.map((entry) => entry.p), sort);
 }
+
 
 const BOTH_MODE_PREVIEW_COUNT = 5;
 
@@ -2732,6 +2791,49 @@ function SearchTab({ collectionSource, collectionItems, extrasMap }) {
         if (controller.signal.aborted) return;
         if ((effectiveData?.pagination?.items || 0) > 0) break;
       }
+
+      // Once the primary search proves this is an artist-name search, do one optional
+      // surname/last-token pass. This is how "Bernard Purdie" can also surface "Pretty Purdie"
+      // without making every multi-word title search unexpectedly broaden.
+      if (trimmedQuery && isMultiWordNameQuery(trimmedQuery) && effectiveData?.results?.length) {
+        const primaryResults = effectiveData.results || [];
+        const hasExactNameMatch = primaryResults.some((r) =>
+          searchResultMatchesArtistQuery(r, trimmedQuery)
+        );
+        if (hasExactNameMatch) {
+          const words = normalizeSearchName(trimmedQuery).split(" ").filter(Boolean);
+          const lastNameToken = words[words.length - 1];
+          if (lastNameToken) {
+            try {
+              const secondaryParams = { ...baseParams, q: lastNameToken };
+              delete secondaryParams.barcode;
+              delete secondaryParams.catno;
+              const secondaryData = await discogsFetch(secondaryParams, controller.signal);
+              if (controller.signal.aborted) return;
+
+              const primaryIds = new Set(primaryResults.map((r) => r.id));
+              const partialResults = (secondaryData?.results || [])
+                .filter((r) => !primaryIds.has(r.id))
+                .filter((r) => artistNameHasPartialLastToken(searchResultArtist(r), trimmedQuery));
+
+              if (partialResults.length) {
+                effectiveData = {
+                  ...effectiveData,
+                  results: [...primaryResults, ...partialResults],
+                  pagination: {
+                    ...effectiveData.pagination,
+                    items: (effectiveData.pagination?.items || primaryResults.length) + partialResults.length,
+                  },
+                };
+              }
+            } catch (e) {
+              if (e.name === "AbortError") throw e;
+              // Keep the primary results if the optional variant lookup fails.
+            }
+          }
+        }
+      }
+
       // Discogs' search can't exclude "things I already own" itself, so this filters the
       // page we got back rather than the query — a page can come back short of per_page as
       // a result, an acceptable tradeoff for "don't show records I already have" over
