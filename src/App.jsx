@@ -617,6 +617,25 @@ function toIdSet(excluded) {
   return new Set([excluded]);
 }
 
+// Discogs' /database/search accepts a general free-text `q`, but also dedicated `catno` and
+// `barcode` fields — and for exact codes those are meaningfully more reliable than `q`, whose
+// relevance ranking is tuned for artist/title text and can bury or miss an exact catalog number
+// or barcode match. So a query that looks like one of those gets routed to the matching
+// dedicated field instead of `q`; anything else (the overwhelming majority of searches — an
+// artist name, an album title, a phrase with spaces) goes through `q` exactly as before.
+function looksLikeBarcode(q) {
+  return /^\d{6,14}$/.test(q.trim());
+}
+function looksLikeCatalogNumber(q) {
+  const t = q.trim();
+  if (looksLikeBarcode(t)) return false; // digits-only that long is a barcode, not a catalog number
+  if (!t || t.length > 24) return false;
+  if (!/\d/.test(t)) return false; // catalog numbers always carry at least one digit
+  if (!/^[A-Za-z0-9][A-Za-z0-9\-./ ]*$/.test(t)) return false; // only characters catalog numbers actually use
+  if (t.split(/\s+/).filter(Boolean).length > 2) return false; // catalog numbers are rarely more than two tokens; a real phrase almost always is
+  return true;
+}
+
 // Discogs stops serving search results somewhere around the 10,000th item, so there's no
 // point rolling a page number beyond that — deep pages just error or come back empty.
 const SEARCH_PER_PAGE = 100; // Discogs' max
@@ -2604,8 +2623,16 @@ function SearchTab({ collectionSource, collectionItems, extrasMap }) {
       };
       // Discogs' search treats an empty q as a literal (and mostly fruitless) filter rather
       // than "no text filter" — only send it when there's actually something to search for,
-      // same as Discover never sends q at all for its filter-only queries.
-      if (q.trim()) params.q = q.trim();
+      // same as Discover never sends q at all for its filter-only queries. A query shaped like
+      // a barcode or catalog number is routed to Discogs' dedicated field for that instead of
+      // the general text field, since that's a much more reliable match for an exact code (see
+      // looksLikeBarcode/looksLikeCatalogNumber above).
+      const trimmedQuery = q.trim();
+      if (trimmedQuery) {
+        if (looksLikeBarcode(trimmedQuery)) params.barcode = trimmedQuery;
+        else if (looksLikeCatalogNumber(trimmedQuery)) params.catno = trimmedQuery;
+        else params.q = trimmedQuery;
+      }
       if (only) params.type = "release";
       if (filters.genre && filters.genre !== "Any Genre") params.genre = filters.genre;
       if (filters.style) params.style = filters.style;
