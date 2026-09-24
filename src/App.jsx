@@ -793,19 +793,22 @@ async function fetchFullCollection({ username, useAuth = false, resumeItems, res
 // Reshapes a Discogs collection entry into the same rough shape as a /database/search
 // result, so the rest of the app (rendering, detail lookups, exclusion tracking) doesn't
 // need to know whether a pick came from the global catalog or a personal collection.
-function collectionItemToPick(item, countryMap) {
+function collectionItemToPick(item, extrasMap) {
   const info = item.basic_information || {};
   const artistNames = (info.artists || []).map((a) => a.name).filter(Boolean).join(", ");
+  const extras = extrasMap && info.id in extrasMap ? extrasMap[info.id] : null;
   return {
     id: info.id,
     master_id: info.master_id || null,
     resource_url: info.resource_url,
     title: artistNames ? `${artistNames} - ${info.title}` : info.title,
     year: info.year || null,
-    // The bulk collection listing doesn't include country at all — this comes from the
-    // separate background enrichment cache (see useCollectionCountryEnrichment) when available,
-    // and stays null for anything not enriched yet.
-    country: countryMap && info.id in countryMap ? countryMap[info.id] || null : null,
+    // The bulk collection listing doesn't include country, barcode, or runout/matrix info —
+    // those come from the separate background enrichment cache (see
+    // useCollectionReleaseEnrichment) when available, and stay empty for anything not
+    // enriched yet.
+    country: extras?.country || null,
+    identifiers: extras?.identifiers || [],
     genre: info.genres || [],
     style: info.styles || [],
     format: (info.formats || []).flatMap((f) => [f.name, ...(f.descriptions || [])]).filter(Boolean),
@@ -813,6 +816,9 @@ function collectionItemToPick(item, countryMap) {
     thumb: info.thumb || null,
     uri: info.id ? `/release/${info.id}` : null,
     label: (info.labels || []).map((l) => l.name),
+    // Catalog number lives on each label entry in the bulk listing itself — no enrichment
+    // fetch needed for this one.
+    catno: (info.labels || []).map((l) => l.catno).filter(Boolean),
   };
 }
 
@@ -838,11 +844,11 @@ function collectionPickMatchesFilters(pick, filters) {
 // already in memory, this filters + shuffles once instead of retrying network calls; when a
 // detail check is needed (rating, artwork, custom extraCheck) it walks the shuffled
 // candidates until one clears it or the candidate pool runs out.
-async function randomFromCollection(items, filters, excluded, needsDetail, extraCheck, signal, countryMap) {
+async function randomFromCollection(items, filters, excluded, needsDetail, extraCheck, signal, extrasMap) {
   const excludedIds = toIdSet(excluded);
   const candidates = shuffle(
     (items || [])
-      .map((it) => collectionItemToPick(it, countryMap))
+      .map((it) => collectionItemToPick(it, extrasMap))
       .filter((p) => p.id && !excludedIds.has(p.id) && !(p.master_id && excludedIds.has(p.master_id)))
       .filter((p) => collectionPickMatchesFilters(p, filters))
   );
@@ -920,7 +926,7 @@ export default function App() {
   const [collectionLoading, setCollectionLoading] = useState(false);
   const [collectionError, setCollectionError] = useState("");
   const [theme, setTheme] = useState(getInitialTheme);
-  const countryMap = useCollectionCountryEnrichment(collectionItems, collectionSource?.username || null, collectionLoading);
+  const extrasMap = useCollectionReleaseEnrichment(collectionItems, collectionSource?.username || null, collectionLoading);
 
   useEffect(() => {
     try {
@@ -1106,10 +1112,10 @@ export default function App() {
         />
 
         {tab === "discover" && (
-          <DiscoverTab collectionSource={collectionSource} collectionItems={collectionItems} countryMap={countryMap} />
+          <DiscoverTab collectionSource={collectionSource} collectionItems={collectionItems} extrasMap={extrasMap} />
         )}
         {tab === "search" && (
-          <SearchTab collectionSource={collectionSource} collectionItems={collectionItems} countryMap={countryMap} />
+          <SearchTab collectionSource={collectionSource} collectionItems={collectionItems} extrasMap={extrasMap} />
         )}
         {tab === "games" && (
           <GamesTab collectionSource={collectionSource} collectionItems={collectionItems} />
@@ -1142,7 +1148,12 @@ const COLLECTION_STORE_NAME = "collections";
 // doesn't include it at all), so once a release's country is known it's cached here forever —
 // keyed globally by release id rather than by username, since a release's country is a fact
 // about the release, not about whose collection it's sitting in.
-const COUNTRY_STORE_NAME = "releaseCountries";
+// Pressing country, barcode, and matrix/runout data all require a full per-release fetch (the
+// bulk collection listing doesn't include any of them), so once a release has been looked up
+// once, everything from that lookup is cached here forever — keyed globally by release id
+// rather than by username, since these are facts about the release, not about whose collection
+// it's sitting in.
+const RELEASE_EXTRAS_STORE_NAME = "releaseCountries"; // kept as-is from the original country-only cache so existing entries aren't orphaned; it now holds { country, identifiers } per release.
 
 function collectionCacheKey(type, username) {
   return `discogs-collection-cache:${COLLECTION_CACHE_VERSION}:${type}:${username.toLowerCase()}`;
@@ -1159,8 +1170,8 @@ function openCollectionDB() {
       if (!request.result.objectStoreNames.contains(COLLECTION_STORE_NAME)) {
         request.result.createObjectStore(COLLECTION_STORE_NAME);
       }
-      if (!request.result.objectStoreNames.contains(COUNTRY_STORE_NAME)) {
-        request.result.createObjectStore(COUNTRY_STORE_NAME);
+      if (!request.result.objectStoreNames.contains(RELEASE_EXTRAS_STORE_NAME)) {
+        request.result.createObjectStore(RELEASE_EXTRAS_STORE_NAME);
       }
     };
     request.onsuccess = () => resolve(request.result);
@@ -1217,19 +1228,23 @@ async function clearCollectionCache(type, username) {
   }
 }
 
-// Reads the whole country cache as a plain { [releaseId]: countryString } map. It's global and
-// just strings, so even a well-enriched collection stays tiny — reading it all at once is fine.
-async function readCountryCache() {
+// Reads the whole release-extras cache as { [releaseId]: { country, identifiers } }. It's
+// global and just short strings, so even a well-enriched collection stays tiny — reading it all
+// at once is fine. Older entries written before identifiers were tracked are plain country
+// strings; those are normalized to the current shape here rather than needing a migration.
+async function readReleaseExtrasCache() {
   try {
     const db = await openCollectionDB();
     const map = await new Promise((resolve, reject) => {
-      const tx = db.transaction(COUNTRY_STORE_NAME, "readonly");
+      const tx = db.transaction(RELEASE_EXTRAS_STORE_NAME, "readonly");
       const result = {};
-      const req = tx.objectStore(COUNTRY_STORE_NAME).openCursor();
+      const req = tx.objectStore(RELEASE_EXTRAS_STORE_NAME).openCursor();
       req.onsuccess = () => {
         const cursor = req.result;
         if (cursor) {
-          result[cursor.key] = cursor.value;
+          const value = cursor.value;
+          result[cursor.key] =
+            typeof value === "string" ? { country: value, identifiers: [] } : value || { country: "", identifiers: [] };
           cursor.continue();
         } else {
           resolve(result);
@@ -1244,13 +1259,13 @@ async function readCountryCache() {
   }
 }
 
-function writeCountryCacheEntry(releaseId, country) {
+function writeReleaseExtrasCacheEntry(releaseId, extras) {
   openCollectionDB()
     .then(
       (db) =>
         new Promise((resolve, reject) => {
-          const tx = db.transaction(COUNTRY_STORE_NAME, "readwrite");
-          tx.objectStore(COUNTRY_STORE_NAME).put(country || "", releaseId);
+          const tx = db.transaction(RELEASE_EXTRAS_STORE_NAME, "readwrite");
+          tx.objectStore(RELEASE_EXTRAS_STORE_NAME).put(extras, releaseId);
           tx.oncomplete = () => {
             db.close();
             resolve();
@@ -1267,30 +1282,32 @@ function writeCountryCacheEntry(releaseId, country) {
     });
 }
 
-// Trickles pressing-country lookups in for a connected collection, well under Discogs' rate
-// limit and never competing with a real foreground load (the initial sync, or a forced
-// re-sync) for request budget. Each result is cached forever, so this is genuinely one-time
-// cost spread thin across normal use rather than a big wait imposed on anyone — country search
-// starts out only as complete as whatever's been gathered so far and fills in from there.
-const COUNTRY_ENRICH_INTERVAL_MS = 1500;
+// Trickles country + barcode/matrix-runout lookups in for a connected collection, well under
+// Discogs' rate limit and never competing with a real foreground load (the initial sync, or a
+// forced re-sync) for request budget. Both come off the same per-release fetch, so this covers
+// both at no extra request cost. Each result is cached forever, so this is genuinely one-time
+// cost spread thin across normal use rather than a big wait imposed on anyone — search on
+// either field starts out only as complete as whatever's been gathered so far and fills in from
+// there.
+const RELEASE_ENRICH_INTERVAL_MS = 1500;
 
-function useCollectionCountryEnrichment(collectionItems, collectionKey, collectionLoading) {
-  const [countryMap, setCountryMap] = useState({});
-  const countryMapRef = useRef({});
+function useCollectionReleaseEnrichment(collectionItems, collectionKey, collectionLoading) {
+  const [extrasMap, setExtrasMap] = useState({});
+  const extrasMapRef = useRef({});
 
   // The moment a collection connects, pick up whatever's already been learned in a previous
   // session — search benefits immediately from prior enrichment without waiting on new fetches.
   useEffect(() => {
     let cancelled = false;
     if (!collectionKey) {
-      countryMapRef.current = {};
-      setCountryMap({});
+      extrasMapRef.current = {};
+      setExtrasMap({});
       return;
     }
-    readCountryCache().then((cached) => {
+    readReleaseExtrasCache().then((cached) => {
       if (cancelled) return;
-      countryMapRef.current = cached;
-      setCountryMap(cached);
+      extrasMapRef.current = cached;
+      setExtrasMap(cached);
     });
     return () => {
       cancelled = true;
@@ -1307,12 +1324,12 @@ function useCollectionCountryEnrichment(collectionItems, collectionKey, collecti
       // A real foreground load (initial sync, forced re-sync) gets priority on rate-limit
       // budget — just wait and check again rather than racing it.
       if (collectionLoading) {
-        timer = setTimeout(tick, COUNTRY_ENRICH_INTERVAL_MS);
+        timer = setTimeout(tick, RELEASE_ENRICH_INTERVAL_MS);
         return;
       }
       const next = collectionItems.find((it) => {
         const id = it.basic_information?.id;
-        return id && !(id in countryMapRef.current);
+        return id && !(id in extrasMapRef.current);
       });
       if (!next) return; // everything currently in view is enriched — nothing more to do for now
 
@@ -1320,15 +1337,20 @@ function useCollectionCountryEnrichment(collectionItems, collectionKey, collecti
       try {
         const detail = await apiFetch({ kind: "release", id: String(id) });
         if (cancelled) return;
-        const country = detail?.country || "";
-        countryMapRef.current = { ...countryMapRef.current, [id]: country };
-        setCountryMap(countryMapRef.current);
-        writeCountryCacheEntry(id, country);
+        const extras = {
+          country: detail?.country || "",
+          identifiers: (detail?.identifiers || [])
+            .map((ident) => ident.value)
+            .filter(Boolean),
+        };
+        extrasMapRef.current = { ...extrasMapRef.current, [id]: extras };
+        setExtrasMap(extrasMapRef.current);
+        writeReleaseExtrasCacheEntry(id, extras);
       } catch {
         // Leave it uncached — it's still missing next tick and further visits, so it'll get
         // picked up again rather than silently skipped forever.
       }
-      if (!cancelled) timer = setTimeout(tick, COUNTRY_ENRICH_INTERVAL_MS);
+      if (!cancelled) timer = setTimeout(tick, RELEASE_ENRICH_INTERVAL_MS);
     }
 
     tick();
@@ -1338,7 +1360,7 @@ function useCollectionCountryEnrichment(collectionItems, collectionKey, collecti
     };
   }, [collectionItems, collectionLoading]);
 
-  return countryMap;
+  return extrasMap;
 }
 
 // ============================== COLLECTION BAR ==============================
@@ -1689,7 +1711,7 @@ function WantlistButton({ releaseId }) {
   );
 }
 
-function DiscoverTab({ collectionSource, collectionItems, countryMap }) {
+function DiscoverTab({ collectionSource, collectionItems, extrasMap }) {
   const { palette: PALETTE, styles } = useContext(PaletteContext);
   const [genre, setGenre] = useState("Any Genre");
   const [style, setStyle] = useState("");
@@ -1850,7 +1872,7 @@ function DiscoverTab({ collectionSource, collectionItems, countryMap }) {
             return true;
           },
           controller.signal,
-          countryMap
+          extrasMap
         );
         found = outcome.found;
         foundDetail = outcome.foundDetail;
@@ -2453,16 +2475,25 @@ function isAnyFilterActive(f) {
 // Shared by scope "in" (collection-only) and "both" (collection preview + live catalog):
 // every connected-collection item that matches the current text query and filters, sorted
 // the same way collection-scoped search always has. Text matching covers every field the
-// collection endpoint actually gives us per item — title/artist, label, genre, and style —
-// plus country wherever the background enrichment cache (see useCollectionCountryEnrichment)
-// has already learned it; anything not enriched yet just won't match on country until it is.
-function collectionMatches(items, q, sort, filters, countryMap) {
+// collection endpoint actually gives us per item — title/artist, label, catalog number, genre,
+// and style — plus country and barcode/runout identifiers wherever the background enrichment
+// cache (see useCollectionReleaseEnrichment) has already learned them; anything not enriched
+// yet just won't match on those two until it is.
+function collectionMatches(items, q, sort, filters, extrasMap) {
   const needle = q.trim().toLowerCase();
   const matches = (items || [])
-    .map((it) => collectionItemToPick(it, countryMap))
+    .map((it) => collectionItemToPick(it, extrasMap))
     .filter((p) => p.id)
     .filter((p) =>
-      [p.title, ...(p.label || []), ...(p.genre || []), ...(p.style || []), p.country || ""]
+      [
+        p.title,
+        ...(p.label || []),
+        ...(p.catno || []),
+        ...(p.genre || []),
+        ...(p.style || []),
+        p.country || "",
+        ...(p.identifiers || []),
+      ]
         .join(" ")
         .toLowerCase()
         .includes(needle)
@@ -2480,7 +2511,7 @@ function collectionMatches(items, q, sort, filters, countryMap) {
 
 const BOTH_MODE_PREVIEW_COUNT = 5;
 
-function SearchTab({ collectionSource, collectionItems, countryMap }) {
+function SearchTab({ collectionSource, collectionItems, extrasMap }) {
   const { styles } = useContext(PaletteContext);
   const [query, setQuery] = useState("");
   const [submittedQuery, setSubmittedQuery] = useState("");
@@ -2519,7 +2550,7 @@ function SearchTab({ collectionSource, collectionItems, countryMap }) {
     [collectionItems]
   );
 
-  const runSearch = useCallback(async (q, pageNum, only, sort, source, items, filters, scopeArg, countryMapArg) => {
+  const runSearch = useCallback(async (q, pageNum, only, sort, source, items, filters, scopeArg, extrasMapArg) => {
     const effectiveScope = source ? scopeArg : "out";
     // A blank query is only valid when there's something else doing the narrowing — a
     // connected collection to browse, or a genre/style/format filter set.
@@ -2535,7 +2566,7 @@ function SearchTab({ collectionSource, collectionItems, countryMap }) {
       setError("");
       setCollectionPreview([]);
       setCollectionPreviewTotal(0);
-      const sorted = collectionMatches(items, q, sort, filters, countryMapArg);
+      const sorted = collectionMatches(items, q, sort, filters, extrasMapArg);
       const perPage = SEARCH_RESULTS_PER_PAGE;
       const totalPages = Math.max(1, Math.ceil(sorted.length / perPage));
       const clampedPage = Math.min(Math.max(pageNum, 1), totalPages);
@@ -2553,7 +2584,7 @@ function SearchTab({ collectionSource, collectionItems, countryMap }) {
       : null;
 
     if (effectiveScope === "both") {
-      const sorted = collectionMatches(items, q, sort, filters, countryMapArg);
+      const sorted = collectionMatches(items, q, sort, filters, extrasMapArg);
       setCollectionPreview(sorted.slice(0, BOTH_MODE_PREVIEW_COUNT));
       setCollectionPreviewTotal(sorted.length);
     } else {
@@ -2618,7 +2649,7 @@ function SearchTab({ collectionSource, collectionItems, countryMap }) {
       return;
     }
     setPage(1);
-    runSearch(submittedQuery, 1, releasesOnly, sortMode, collectionSource, collectionItems, currentFilters(), "in", countryMap);
+    runSearch(submittedQuery, 1, releasesOnly, sortMode, collectionSource, collectionItems, currentFilters(), "in", extrasMap);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [collectionKey]);
 
@@ -2631,13 +2662,13 @@ function SearchTab({ collectionSource, collectionItems, countryMap }) {
     setSubmittedQuery(q);
     setHasSearched(true);
     setPage(1);
-    runSearch(q, 1, releasesOnly, sortMode, collectionSource, collectionItems, filters, scope, countryMap);
+    runSearch(q, 1, releasesOnly, sortMode, collectionSource, collectionItems, filters, scope, extrasMap);
   }
 
   function changePage(next) {
     if (!hasSearched || next < 1) return;
     setPage(next);
-    runSearch(submittedQuery, next, releasesOnly, sortMode, collectionSource, collectionItems, currentFilters(), scope, countryMap);
+    runSearch(submittedQuery, next, releasesOnly, sortMode, collectionSource, collectionItems, currentFilters(), scope, extrasMap);
   }
 
   function changeScope(next) {
@@ -2645,7 +2676,7 @@ function SearchTab({ collectionSource, collectionItems, countryMap }) {
     setScope(next);
     if (hasSearched) {
       setPage(1);
-      runSearch(submittedQuery, 1, releasesOnly, sortMode, collectionSource, collectionItems, currentFilters(), next, countryMap);
+      runSearch(submittedQuery, 1, releasesOnly, sortMode, collectionSource, collectionItems, currentFilters(), next, extrasMap);
     }
   }
 
@@ -2654,7 +2685,7 @@ function SearchTab({ collectionSource, collectionItems, countryMap }) {
     setReleasesOnly(next);
     if (hasSearched) {
       setPage(1);
-      runSearch(submittedQuery, 1, next, sortMode, collectionSource, collectionItems, currentFilters(), scope, countryMap);
+      runSearch(submittedQuery, 1, next, sortMode, collectionSource, collectionItems, currentFilters(), scope, extrasMap);
     }
   }
 
@@ -2663,7 +2694,7 @@ function SearchTab({ collectionSource, collectionItems, countryMap }) {
     setSortMode(next);
     if (hasSearched) {
       setPage(1);
-      runSearch(submittedQuery, 1, releasesOnly, next, collectionSource, collectionItems, currentFilters(), scope, countryMap);
+      runSearch(submittedQuery, 1, releasesOnly, next, collectionSource, collectionItems, currentFilters(), scope, extrasMap);
     }
   }
 
@@ -2677,7 +2708,7 @@ function SearchTab({ collectionSource, collectionItems, countryMap }) {
         genre: nextGenre,
         style: "",
         format: filterFormat,
-      }, scope, countryMap);
+      }, scope, extrasMap);
     }
   }
 
@@ -2690,7 +2721,7 @@ function SearchTab({ collectionSource, collectionItems, countryMap }) {
         genre: filterGenre,
         style: nextStyle,
         format: filterFormat,
-      }, scope, countryMap);
+      }, scope, extrasMap);
     }
   }
 
@@ -2703,7 +2734,7 @@ function SearchTab({ collectionSource, collectionItems, countryMap }) {
         genre: filterGenre,
         style: filterStyle,
         format: nextFormat,
-      }, scope, countryMap);
+      }, scope, extrasMap);
     }
   }
 
@@ -2838,12 +2869,13 @@ function SearchTab({ collectionSource, collectionItems, countryMap }) {
             collectionItems.length > 0 &&
             (() => {
               const enrichedCount = collectionItems.filter(
-                (it) => it.basic_information?.id && it.basic_information.id in (countryMap || {})
+                (it) => it.basic_information?.id && it.basic_information.id in (extrasMap || {})
               ).length;
               return enrichedCount < collectionItems.length ? (
                 <p style={styles.hintText}>
-                  Pressing-country data is still being gathered in the background ({enrichedCount} of{" "}
-                  {collectionItems.length} releases so far) — searching by country will get more complete over time.
+                  Pressing-country and barcode/runout data is still being gathered in the background ({enrichedCount}{" "}
+                  of {collectionItems.length} releases so far) — searching by those will get more complete over
+                  time. Catalog number is already fully searchable.
                 </p>
               ) : null;
             })()}
