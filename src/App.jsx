@@ -2795,7 +2795,12 @@ function SearchTab({ collectionSource, collectionItems, extrasMap }) {
       // Once the primary search proves this is an artist-name search, do one optional
       // surname/last-token pass. This is how "Bernard Purdie" can also surface "Pretty Purdie"
       // without making every multi-word title search unexpectedly broaden.
-      if (trimmedQuery && isMultiWordNameQuery(trimmedQuery) && effectiveData?.results?.length) {
+      if (
+        pageNum === 1 &&
+        trimmedQuery &&
+        isMultiWordNameQuery(trimmedQuery) &&
+        effectiveData?.results?.length
+      ) {
         const primaryResults = effectiveData.results || [];
         const hasExactNameMatch = primaryResults.some((r) =>
           searchResultMatchesArtistQuery(r, trimmedQuery)
@@ -2814,16 +2819,22 @@ function SearchTab({ collectionSource, collectionItems, extrasMap }) {
               const primaryIds = new Set(primaryResults.map((r) => r.id));
               const partialResults = (secondaryData?.results || [])
                 .filter((r) => !primaryIds.has(r.id))
-                .filter((r) => artistNameHasPartialLastToken(searchResultArtist(r), trimmedQuery));
+                .filter((r) => artistNameHasPartialLastToken(searchResultArtist(r), trimmedQuery))
+                .slice(0, 4);
 
               if (partialResults.length) {
+                // Reserve a few slots for useful name variants while keeping the search page
+                // at its normal 20-result size. True matches always come first.
+                const primaryLimit = Math.max(
+                  0,
+                  SEARCH_RESULTS_PER_PAGE - partialResults.length
+                );
                 effectiveData = {
                   ...effectiveData,
-                  results: [...primaryResults, ...partialResults],
-                  pagination: {
-                    ...effectiveData.pagination,
-                    items: (effectiveData.pagination?.items || primaryResults.length) + partialResults.length,
-                  },
+                  results: [
+                    ...primaryResults.slice(0, primaryLimit),
+                    ...partialResults,
+                  ],
                 };
               }
             } catch (e) {
