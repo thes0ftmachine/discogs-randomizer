@@ -4246,6 +4246,8 @@ function buildStyles(PALETTE) {
     padding: "9px 10px",
     borderRadius: 7,
     border: `1px solid ${PALETTE.border}`,
+    background: PALETTE.bg,
+    color: PALETTE.primary,
     fontSize: 13,
   },
   collectionConnectBtn: {
