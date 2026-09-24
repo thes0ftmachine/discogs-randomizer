@@ -2761,24 +2761,47 @@ function SearchTab({ collectionSource, collectionItems, extrasMap }) {
       //     total matches) falls through to one last plain-text q attempt, since Discogs' own
       //     general search — as on discogs.com — is often more forgiving about exactly this
       //     kind of formatting than the dedicated field is.
+      // Exact identifier searches should not inherit genre/style/format/country filters.
+      // A barcode or catalog number identifies a specific release; carrying unrelated search
+      // filters into the identifier lookup can make a valid Discogs match disappear. We still
+      // preserve pagination and the user's sort choice for the results UI.
+      const structuredBaseParams = {
+        page: String(pageNum),
+        per_page: String(SEARCH_RESULTS_PER_PAGE),
+        ...sortParamsFor(sortMode),
+        type: "release",
+      };
+
       const attempts = [];
       let usedStructuredField = false;
       if (trimmedQuery) {
         if (looksLikeBarcode(trimmedQuery)) {
           usedStructuredField = true;
           for (const barcode of barcodeVariants(trimmedQuery)) {
-            attempts.push({ ...baseParams, type: "release", barcode });
+            attempts.push({ ...structuredBaseParams, barcode });
           }
         } else if (looksLikeCatalogNumber(trimmedQuery)) {
           usedStructuredField = true;
-          attempts.push({ ...baseParams, type: "release", catno: trimmedQuery });
+          attempts.push({ ...structuredBaseParams, catno: trimmedQuery });
         } else {
           attempts.push({ ...baseParams, q: trimmedQuery });
         }
       } else {
         attempts.push({ ...baseParams });
       }
-      if (usedStructuredField) attempts.push({ ...baseParams, q: trimmedQuery });
+
+      // If Discogs' dedicated identifier index does not return anything, make one completely
+      // unfiltered text-search fallback. This avoids accidentally turning an exact identifier
+      // lookup into "identifier + whatever filters happened to be selected in the UI".
+      if (usedStructuredField) {
+        attempts.push({
+          page: String(pageNum),
+          per_page: String(SEARCH_RESULTS_PER_PAGE),
+          ...sortParamsFor(sortMode),
+          type: "release",
+          q: trimmedQuery,
+        });
+      }
 
       let effectiveData = null;
       for (const attempt of attempts) {
