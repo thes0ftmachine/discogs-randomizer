@@ -3710,7 +3710,7 @@ async function drawValidRelease(statKey, excludeId, collectionItems, attempts) {
     const maxCollectionAttempts = attempts ?? 20;
     const candidates = shuffle(
       collectionItems
-        .map(collectionItemToPick)
+        .map((it) => collectionItemToPick(it))
         .filter((p) => p.id && !excluded.has(p.id) && !(p.master_id && excluded.has(p.master_id)))
     );
     for (let i = 0; i < Math.min(candidates.length, maxCollectionAttempts); i++) {
@@ -3981,7 +3981,7 @@ async function drawGenreRound(excludeId, collectionItems, attempts) {
     const maxCollectionAttempts = attempts ?? 20;
     const candidates = shuffle(
       collectionItems
-        .map(collectionItemToPick)
+        .map((it) => collectionItemToPick(it))
         .filter((p) => p.id && !excluded.has(p.id) && !(p.master_id && excluded.has(p.master_id)))
         .filter((p) => (p.genre || []).some((g) => GAME_GENRES.includes(g)))
     );
