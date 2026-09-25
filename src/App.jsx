@@ -2571,6 +2571,21 @@ function sortCollectionMatches(items, sortMode) {
   return items;
 }
 
+// Discogs' /database/search endpoint doesn't actually document or honor a sort/sort_order
+// parameter (unlike artist-releases, master-versions, inventory, and orders, which do) — it
+// always returns its own relevance-ish ordering, which tends to track how recently a release
+// was catalogued rather than the release's actual year. So "Newest first"/"Oldest first"
+// needs to be applied ourselves against the page we got back rather than trusted to the API.
+// This only sorts within the page in hand (Discogs' own pagination decides which releases
+// land on which page), which is a real limitation for a huge unfiltered result set — but it's
+// still correct, unlike silently ignoring the sort entirely.
+function sortSearchResultsByYear(results, sortMode) {
+  if (sortMode === "year_desc") return [...results].sort((a, b) => (Number(b.year) || 0) - (Number(a.year) || 0));
+  if (sortMode === "year_asc") return [...results].sort((a, b) => (Number(a.year) || 0) - (Number(b.year) || 0));
+  return results;
+}
+}
+
 // A blank query is normally not searchable — but a genre/style/format filter on its own is
 // a valid "browse the catalog by filter" request, same idea as Discover's filters minus the
 // randomization. Collection-connected browsing (no filters needed) is handled separately.
@@ -2910,7 +2925,7 @@ function SearchTab({ collectionSource, collectionItems, extrasMap }) {
       // trying to backfill from the next page.
       const raw = effectiveData?.results || [];
       const filtered = collectionIdSet ? raw.filter((r) => !collectionIdSet.has(r.id)) : raw;
-      setResults(filtered);
+      setResults(sortSearchResultsByYear(filtered, sort));
       setPagination(effectiveData?.pagination || null);
     } catch (e) {
       if (e.name === "AbortError") return;
