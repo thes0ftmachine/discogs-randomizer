@@ -1345,12 +1345,17 @@ function writeReleaseExtrasCacheEntry(releaseId, extras) {
 
 // Trickles country + barcode/matrix-runout lookups in for a connected collection, well under
 // Discogs' rate limit and never competing with a real foreground load (the initial sync, or a
-// forced re-sync) for request budget. Both come off the same per-release fetch, so this covers
-// both at no extra request cost. Each result is cached forever, so this is genuinely one-time
-// cost spread thin across normal use rather than a big wait imposed on anyone — search on
-// either field starts out only as complete as whatever's been gathered so far and fills in from
-// there.
-const RELEASE_ENRICH_INTERVAL_MS = 1500;
+// forced re-sync) for request budget — this loop stands down entirely while collectionLoading
+// is true. Both come off the same per-release fetch, so this covers both at no extra request
+// cost. Each result is cached forever, so this is genuinely one-time cost spread thin across
+// normal use rather than a big wait imposed on anyone — search on either field starts out only
+// as complete as whatever's been gathered so far and fills in from there.
+//
+// In the common case (initial sync already finished) this loop is the *only* thing spending
+// API budget, so it doesn't need to leave room for a concurrent foreground load that isn't
+// happening. 1050ms keeps us at ~57 req/min, still comfortably under Discogs' 60/min moving-
+// window limit, without reserving headroom nothing else is using.
+const RELEASE_ENRICH_INTERVAL_MS = 1050;
 
 function useCollectionReleaseEnrichment(collectionItems, collectionKey, collectionLoading) {
   const [extrasMap, setExtrasMap] = useState({});
