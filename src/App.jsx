@@ -2602,7 +2602,6 @@ function sortSearchResultsByYear(results, sortMode) {
   if (sortMode === "year_asc") return [...results].sort((a, b) => (Number(a.year) || 0) - (Number(b.year) || 0));
   return results;
 }
-}
 
 // A blank query is normally not searchable — but a genre/style/format filter on its own is
 // a valid "browse the catalog by filter" request, same idea as Discover's filters minus the
