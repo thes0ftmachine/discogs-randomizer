@@ -972,6 +972,48 @@ function Turntable({ size = 64 }) {
 
 const THEME_STORAGE_KEY = "discogs-randomizer-theme";
 
+// ---- Small inline icon set for the discovery-mode buttons ----
+// Emoji (🔁 🌀 ↕️) render inconsistently across platforms — some systems lack the glyph
+// entirely and show a blank box ("tofu"), and even where they render, color/weight is
+// whatever the OS emoji font decides, not something we control. These use currentColor
+// so they inherit the button's text color and stay legible in both themes everywhere.
+
+// "Another Like This" — repeat/loop, same idea as the old 🔁.
+function RepeatIcon({ size = 16 }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" style={{ verticalAlign: "-3px", marginRight: 4 }}>
+      <path d="M17 2l4 4-4 4" />
+      <path d="M3 11V9a4 4 0 0 1 4-4h14" />
+      <path d="M7 22l-4-4 4-4" />
+      <path d="M21 13v2a4 4 0 0 1-4 4H3" />
+    </svg>
+  );
+}
+
+// "Obscurer" — a spiral, standing in for the old 🌀 (digging into more obscure territory).
+function SpiralIcon({ size = 16 }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden="true" style={{ verticalAlign: "-3px", marginRight: 4 }}>
+      <path d="M12 4a8 8 0 1 1-5.657 2.343" />
+      <path d="M12 8a4 4 0 1 1-2.828 1.172" />
+      <path d="M12 12a1.3 1.3 0 1 1-0.9.37" />
+    </svg>
+  );
+}
+
+// "High Ratings, Low Haves" — an inverse relationship, standing in for the old ↕️.
+function UpDownIcon({ size = 16 }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" style={{ verticalAlign: "-3px", marginRight: 4 }}>
+      <path d="M8 3L4 7l4 4" />
+      <path d="M4 7h9" />
+      <path d="M16 21l4-4-4-4" />
+      <path d="M20 17h-9" />
+    </svg>
+  );
+}
+
+
 // Reads any previously-saved choice first; if there isn't one, defers to the OS/browser
 // light-vs-dark setting so a first-time visitor sees the mode they already prefer elsewhere.
 function getInitialTheme() {
@@ -2461,19 +2503,19 @@ function DiscoverTab({ collectionSource, collectionItems, extrasMap }) {
       {hasResultContext ? (
         <div style={styles.discoveryModeRow}>
           <button style={{ ...styles.modeButton, ...(loading ? styles.modeButtonDisabled : {}) }} onClick={handleAnotherLikeThis} disabled={loading}>
-            🔁 Another like this
+            <RepeatIcon /> Another like this
           </button>
           <button style={{ ...styles.modeButton, ...(loading ? styles.modeButtonDisabled : {}) }} onClick={handleWeirder} disabled={loading}>
-            🌀 Obscurer
+            <SpiralIcon /> Obscurer
           </button>
           <button style={{ ...styles.modeButton, ...(loading ? styles.modeButtonDisabled : {}) }} onClick={handleHiddenGem} disabled={loading}>
-            ↕️ High Ratings, Low Haves
+            <UpDownIcon /> High Ratings, Low Haves
           </button>
         </div>
       ) : (
         <div style={styles.discoveryModeRow}>
           <button style={{ ...styles.modeButton, ...(loading ? styles.modeButtonDisabled : {}) }} onClick={handleHiddenGem} disabled={loading}>
-            ↕️ High Ratings, Low Haves
+            <UpDownIcon /> High Ratings, Low Haves
           </button>
         </div>
       )}
