@@ -341,6 +341,14 @@ const GENRE_STYLES = {
   ]
 };
 
+// Reverse lookup: style -> its owning genre in GENRE_STYLES. Used so a style-chip click
+// (Rabbit Hole) resolves the genre deterministically from the app's own taxonomy instead
+// of trusting Discogs' genres[0] on the current release, which can list an unrelated
+// crossover genre first (e.g. a jazz compilation tagged ["Electronic", "Jazz"]).
+const STYLE_TO_GENRE = Object.fromEntries(
+  Object.entries(GENRE_STYLES).flatMap(([g, styles]) => styles.map((s) => [s, g]))
+);
+
 const DECADES = ["Any Decade", "1950s", "1960s", "1970s", "1980s", "1990s", "2000s", "2010s", "2020s"];
 
 // Curated list of pressing-country values as Discogs tends to store them. Best-effort —
@@ -2069,7 +2077,11 @@ function DiscoverTab({ collectionSource, collectionItems, extrasMap }) {
   // "Rabbit Hole" — click a style chip on the current result to drill straight into that
   // genre + style combination instead of going back to the form.
   function handleRabbitHole(clickedStyle) {
-    const g = primaryGenre();
+    // Resolve genre from the style itself (deterministic, from our own taxonomy) rather
+    // than primaryGenre() — a release can carry several genre tags (e.g. a jazz reissue
+    // also tagged "Electronic"), and genres[0] isn't necessarily the one the clicked style
+    // belongs to. Fall back to primaryGenre() only if the style isn't in our map at all.
+    const g = STYLE_TO_GENRE[clickedStyle] || primaryGenre();
     if (!g) return;
     weirderCeilingRef.current = null;
     setModeNotice(`Down the rabbit hole: ${g} → ${clickedStyle}`);
@@ -2092,7 +2104,13 @@ function DiscoverTab({ collectionSource, collectionItems, extrasMap }) {
 
   // "Another Like This" — same genre, same decade as the current result, different artist.
   function handleAnotherLikeThis() {
-    const g = primaryGenre();
+    // Prefer the genre the person actually has filtered on, as long as the current release
+    // is genuinely tagged with it — that's the "vein" they asked for. Only fall back to
+    // primaryGenre() (genres[0]) when the filter is "Any Genre" or the release doesn't
+    // carry that tag at all, so a multi-genre release (e.g. tagged both Jazz and
+    // Electronic) doesn't silently hijack the search onto whichever tag Discogs lists first.
+    const tags = detail?.genres || result?.genre || [];
+    const g = (genre !== "Any Genre" && tags.includes(genre)) ? genre : primaryGenre();
     if (!g) return;
     // Search results don't always carry a year, and the detail object sometimes does.
     // Without one we just drop the decade pin rather than leaving the button inert.
