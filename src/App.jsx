@@ -3149,6 +3149,10 @@ function SearchTab({ collectionSource, collectionItems, extrasMap }) {
         <input
           style={styles.searchInput}
           type="text"
+          autoCorrect="off"
+          autoCapitalize="off"
+          autoComplete="off"
+          spellCheck="false"
           placeholder={
             collectionSource
               ? "Search, or leave blank to browse the whole collection…"
