@@ -3633,8 +3633,41 @@ function SearchResultModal({ result, detail, loading, error, imageIndex, setImag
         </div>
 
         <div style={styles.modalBody}>
-          <h2 style={styles.cardTitle}>{title}</h2>
-          {artist && <p style={styles.cardArtist}>{artist}</p>}
+          <h2 style={styles.cardTitle}>
+            <a href={releaseUrl} target="_blank" rel="noreferrer" style={styles.titleLink}>{title}</a>
+          </h2>
+          {artist && (
+            <p style={styles.cardArtist}>
+              {detail?.artists?.length ? (
+                detail.artists.map((a, i) => (
+                  <React.Fragment key={a.id ?? a.name}>
+                    {i > 0 && ", "}
+                    {a.id ? (
+                      <a
+                        href={`https://www.discogs.com/artist/${a.id}`}
+                        target="_blank"
+                        rel="noreferrer"
+                        style={styles.artistLink}
+                      >
+                        {a.name}
+                      </a>
+                    ) : (
+                      a.name
+                    )}
+                  </React.Fragment>
+                ))
+              ) : (
+                <a
+                  href={`https://www.discogs.com/search/?q=${encodeURIComponent(artist)}&type=artist`}
+                  target="_blank"
+                  rel="noreferrer"
+                  style={styles.artistLink}
+                >
+                  {artist}
+                </a>
+              )}
+            </p>
+          )}
 
           {isMaster && (
             <p style={styles.modeNotice}>
