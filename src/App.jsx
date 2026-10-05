@@ -3787,6 +3787,29 @@ function SearchResultModal({ result, detail, loading, error, imageIndex, setImag
                   <strong>Catalog #:</strong> {detail?.labels?.[0]?.catno || result.catno}
                 </p>
               )}
+              {(() => {
+                const fmts = detail?.formats?.length ? detail.formats : result.formats;
+                const variant = getVariant({ formats: fmts });
+                const descriptors = [...new Set((Array.isArray(fmts) ? fmts : []).flatMap((f) => f.descriptions || []))];
+                return (
+                  <>
+                    {variant && (
+                      <p style={styles.metaLine}>
+                        <strong>Variant:</strong>{" "}
+                        <span style={{ display: "inline-flex", alignItems: "center", gap: 5, verticalAlign: "middle" }}>
+                          {variant.dots.map((hex) => <VariantDot key={hex} hex={hex} />)}
+                          <span>{variant.text}</span>
+                        </span>
+                      </p>
+                    )}
+                    {descriptors.length > 0 && (
+                      <p style={styles.metaLine}>
+                        <strong>Details:</strong> {descriptors.join(" · ")}
+                      </p>
+                    )}
+                  </>
+                );
+              })()}
               <p style={styles.cardSubline}>
                 {[detail?.year || result.year, detail?.country || result.country, result.format?.[0]]
                   .filter(Boolean)
