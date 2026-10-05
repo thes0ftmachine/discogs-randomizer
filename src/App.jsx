@@ -881,6 +881,7 @@ function collectionItemToPick(item, extrasMap) {
     genre: info.genres || [],
     style: info.styles || [],
     format: (info.formats || []).flatMap((f) => [f.name, ...(f.descriptions || [])]).filter(Boolean),
+    formats: info.formats || [],
     cover_image: info.cover_image || info.thumb || null,
     thumb: info.thumb || null,
     uri: info.id ? `/release/${info.id}` : null,
@@ -2720,6 +2721,55 @@ function collectionMatches(items, q, sort, filters, extrasMap) {
 
 const BOTH_MODE_PREVIEW_COUNT = 5;
 
+// ---- Vinyl/CD color variant (Discogs puts it in formats[].text, free text) ----
+// Ordered most-specific first; a text can match up to two colors (e.g. "Red / Blue Splatter").
+const VARIANT_COLORS = [
+  [/clear|transparent|translucent/i, "clear"],
+  [/glow/i, "#c8f7c5"],
+  [/black/i, "#1a1a1a"],
+  [/white|milky|bone|cream|ivory/i, "#f2efe6"],
+  [/grey|gray|smoke|silver/i, "#9a9a9a"],
+  [/gold|yellow|mustard|lemon/i, "#e8c547"],
+  [/orange|tangerine|amber/i, "#f08a24"],
+  [/pink|magenta|rose/i, "#ef7fb0"],
+  [/red|crimson|blood|maroon|burgundy/i, "#d33a3a"],
+  [/purple|violet|lavender|plum|grape/i, "#8a5cc2"],
+  [/blue|navy|cyan|aqua|teal|turquoise/i, "#3b7bd9"],
+  [/green|lime|olive|mint/i, "#3fae5a"],
+  [/brown|tan|bronze|copper/i, "#8b5a2b"],
+];
+
+function getVariant(r) {
+  const fmts = Array.isArray(r.formats) ? r.formats : [];
+  const text = fmts.map((f) => (f.text || "").trim()).find(Boolean) || "";
+  if (!text) return null;
+  const dots = [];
+  for (const [re, hex] of VARIANT_COLORS) {
+    if (re.test(text) && !dots.includes(hex)) dots.push(hex);
+    if (dots.length === 2) break;
+  }
+  return { text, dots };
+}
+
+function VariantDot({ hex }) {
+  const clear = hex === "clear";
+  return (
+    <span
+      aria-hidden="true"
+      style={{
+        width: 9,
+        height: 9,
+        borderRadius: "50%",
+        display: "inline-block",
+        flexShrink: 0,
+        background: clear ? "transparent" : hex,
+        border: "1px solid rgba(255,255,255,0.35)",
+        boxSizing: "border-box",
+      }}
+    />
+  );
+}
+
 function SearchTab({ collectionSource, collectionItems, extrasMap }) {
   const { styles } = useContext(PaletteContext);
   const [query, setQuery] = useState("");
@@ -3329,6 +3379,7 @@ function SearchTab({ collectionSource, collectionItems, extrasMap }) {
             {results.map((r) => {
               const { artist, title } = splitArtistTitle(r, null);
               const tags = (r.style?.length ? r.style : r.genre) || [];
+              const variant = getVariant(r);
               return (
                 <button
                   type="button"
@@ -3345,9 +3396,15 @@ function SearchTab({ collectionSource, collectionItems, extrasMap }) {
                   <div style={styles.searchCardBody}>
                     <p style={styles.searchCardTitle}>{title || r.title}</p>
                     {artist && <p style={styles.searchCardArtist}>{artist}</p>}
-                    <p style={styles.searchCardMeta}>
+                    <p style={{ ...styles.searchCardMeta, margin: variant ? "0 0 3px" : "0 0 6px" }}>
                       {[r.year, r.format?.[0]].filter(Boolean).join(" · ")}
                     </p>
+                    {variant && (
+                      <p style={styles.searchCardVariant}>
+                        {variant.dots.map((hex) => <VariantDot key={hex} hex={hex} />)}
+                        <span style={styles.searchCardVariantText}>{variant.text}</span>
+                      </p>
+                    )}
                     {tags.length > 0 && (
                       <div style={styles.searchTagRow}>
                         {tags.slice(0, 2).map((t) => (
@@ -4973,6 +5030,8 @@ function buildStyles(PALETTE) {
     whiteSpace: "nowrap",
   },
   searchCardMeta: { fontSize: 11.5, color: PALETTE.muted, margin: "0 0 6px" },
+  searchCardVariant: { display: "flex", alignItems: "center", gap: 4, margin: "0 0 6px", fontSize: 11.5, color: PALETTE.muted },
+  searchCardVariantText: { overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", minWidth: 0 },
   searchTagRow: { display: "flex", flexWrap: "wrap", gap: 4 },
   searchTag: {
     fontSize: 10.5,
