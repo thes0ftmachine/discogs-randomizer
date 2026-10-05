@@ -1252,7 +1252,11 @@ export default function App() {
 // slowest-to-rebuild collections, i.e. the ones this cache matters most for. IndexedDB's quota
 // is in the hundreds of MB to GB range, so it doesn't hit that wall.
 const COLLECTION_CACHE_VERSION = "v1";
-const COLLECTION_CACHE_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours — "Sync now" is always right there for a manual refresh, so it's fine to let a passive reopen ride on a same-day cache instead of re-paging.
+// Hard expiry for a full rebuild. Day-to-day freshness comes from incremental checks (see
+// incrementalSync below), which only fetch what was added since the cache was built, so the
+// full re-page only needs to happen occasionally to catch removals and edits to old entries.
+const COLLECTION_CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+const COLLECTION_RECHECK_MS = 5 * 60 * 1000; // how long a tab can sit before returning to it triggers another quiet check
 const COLLECTION_DB_NAME = "discogs-randomizer-cache";
 const COLLECTION_DB_VERSION = 2;
 const COLLECTION_STORE_NAME = "collections";
@@ -1309,12 +1313,12 @@ async function readCollectionCache(type, username) {
   }
 }
 
-async function writeCollectionCache(type, username, items) {
+async function writeCollectionCache(type, username, items, timestamp = Date.now()) {
   try {
     const db = await openCollectionDB();
     await new Promise((resolve, reject) => {
       const tx = db.transaction(COLLECTION_STORE_NAME, "readwrite");
-      tx.objectStore(COLLECTION_STORE_NAME).put({ items, timestamp: Date.now() }, collectionCacheKey(type, username));
+      tx.objectStore(COLLECTION_STORE_NAME).put({ items, timestamp }, collectionCacheKey(type, username));
       tx.oncomplete = () => resolve();
       tx.onerror = () => reject(tx.error);
     });
@@ -1484,6 +1488,37 @@ function useCollectionReleaseEnrichment(collectionItems, collectionKey, collecti
 // Always-visible strip between the tabs and whichever tab is active. Connecting here scopes
 // both Discover and Games to the connected collection — it isn't a separate destination.
 
+// Pages the collection newest-first (sort=added, desc) and stops as soon as it reaches an item
+// we already have, so "what's new since last time" is usually a single request. Also returns
+// Discogs' own total so the caller can tell whether anything was removed in the meantime.
+async function fetchNewCollectionItems({ username, useAuth = false }, knownIds, signal) {
+  const newItems = [];
+  let page = 1;
+  let total = null;
+  while (true) {
+    const base = useAuth ? { kind: "my-collection" } : { kind: "collection", username };
+    const requestStarted = Date.now();
+    const data = await fetchCollectionPage(
+      { ...base, page: String(page), per_page: String(COLLECTION_PER_PAGE), sort: "added", sort_order: "desc" },
+      signal
+    );
+    if (Number.isFinite(data?.pagination?.items)) total = data.pagination.items;
+    const pages = data?.pagination?.pages || 1;
+    let hitKnown = false;
+    for (const item of data?.releases || []) {
+      if (knownIds.has(item.instance_id)) {
+        hitKnown = true;
+        break;
+      }
+      newItems.push(item);
+    }
+    if (hitKnown || page >= pages || signal?.aborted) break;
+    page++;
+    await abortableSleep(Math.max(0, MIN_PAGE_INTERVAL_MS - (Date.now() - requestStarted)), signal);
+  }
+  return { newItems, total };
+}
+
 function CollectionBar({ collectionSource, setCollectionSource, collectionItems, setCollectionItems, loading, setLoading, error, setError }) {
   const { palette: PALETTE, styles } = useContext(PaletteContext);
   const [draftUsername, setDraftUsername] = useState("");
@@ -1498,6 +1533,8 @@ function CollectionBar({ collectionSource, setCollectionSource, collectionItems,
   // unfetched page with the already-fetched items intact, instead of re-paging a large
   // collection from page 1 every time you step away for a few seconds mid-sync.
   const partialLoadRef = useRef(null); // { key, items, nextPage } | null
+  const incrementalSyncRef = useRef(null);
+  const lastCheckRef = useRef(0);
 
   const loadPrivateCollection = useCallback(
     async (username, { forceRefresh = false } = {}) => {
@@ -1514,6 +1551,7 @@ function CollectionBar({ collectionSource, setCollectionSource, collectionItems,
           setProgress(null);
           pendingLoadRef.current = null;
           partialLoadRef.current = null;
+          incrementalSyncRef.current?.("private", username, { silent: true });
           return;
         }
       }
@@ -1594,14 +1632,19 @@ function CollectionBar({ collectionSource, setCollectionSource, collectionItems,
       }
       // visible again
       const pending = pendingLoadRef.current;
-      if (!pending) return;
+      if (!pending) {
+        if (collectionSource && Date.now() - lastCheckRef.current > COLLECTION_RECHECK_MS) {
+          incrementalSyncRef.current?.(collectionSource.private ? "private" : "public", collectionSource.username, { silent: true });
+        }
+        return;
+      }
       if (pending.type === "private") loadPrivateCollection(pending.username);
       else if (pending.type === "public") connectPublicRef.current?.(pending.username);
     }
     document.addEventListener("visibilitychange", handleVisibilityChange);
     return () => document.removeEventListener("visibilitychange", handleVisibilityChange);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [loading, loadPrivateCollection]);
+  }, [loading, loadPrivateCollection, collectionSource]);
 
   // connectPublic is defined below and referenced by the visibility handler above; a ref
   // avoids having to reorder declarations or wrap connectPublic in its own useCallback.
@@ -1621,6 +1664,7 @@ function CollectionBar({ collectionSource, setCollectionSource, collectionItems,
         setProgress(null);
         pendingLoadRef.current = null;
         partialLoadRef.current = null;
+        incrementalSyncRef.current?.("public", username, { silent: true });
         return;
       }
     }
@@ -1688,10 +1732,63 @@ function CollectionBar({ collectionSource, setCollectionSource, collectionItems,
     setError("");
   }
 
+  // Fetches only what was added since the cache was built and merges it in front. silent = the
+  // automatic check on open / return to the tab: no spinner, never replaces what's on screen,
+  // fails quietly. Manual (Sync now) shows the loading state, and if Discogs' total doesn't match
+  // what we end up with (something was removed), falls back to a full re-page to be accurate.
+  async function incrementalSync(type, username, { silent = false } = {}) {
+    if (silent && pendingLoadRef.current) return; // a real load is already in flight
+    const fullReload = () =>
+      type === "private"
+        ? loadPrivateCollection(username, { forceRefresh: true })
+        : connectPublicRef.current?.(username, { forceRefresh: true });
+    const base = await readCollectionCache(type, username);
+    if (!base || base.items.length === 0 || base.items.some((i) => i.instance_id == null)) {
+      if (!silent) fullReload();
+      return;
+    }
+    const controller = new AbortController();
+    requestRef.current?.abort();
+    requestRef.current = controller;
+    lastCheckRef.current = Date.now();
+    if (!silent) {
+      pendingLoadRef.current = { type, username };
+      setError("");
+      setLoading(true);
+      setProgress(null);
+    }
+    try {
+      const known = new Set(base.items.map((i) => i.instance_id));
+      const { newItems, total } = await fetchNewCollectionItems({ username, useAuth: type === "private" }, known, controller.signal);
+      if (controller.signal.aborted) return;
+      const merged = newItems.length ? [...newItems, ...base.items] : base.items;
+      if (!silent && Number.isFinite(total) && total !== merged.length) {
+        pendingLoadRef.current = null;
+        fullReload();
+        return;
+      }
+      if (newItems.length) {
+        setCollectionItems(merged);
+        await writeCollectionCache(type, username, merged, base.timestamp);
+      }
+      if (!silent) {
+        setLoading(false);
+        pendingLoadRef.current = null;
+      }
+    } catch (e) {
+      if (e.name === "AbortError") return;
+      if (!silent) {
+        setError(e.message || "Couldn't check for new releases.");
+        setLoading(false);
+        pendingLoadRef.current = null;
+      }
+    }
+  }
+  incrementalSyncRef.current = incrementalSync;
+
   function syncNow() {
     if (!collectionSource || loading) return;
-    if (collectionSource.private) loadPrivateCollection(collectionSource.username, { forceRefresh: true });
-    else connectPublic(collectionSource.username, { forceRefresh: true });
+    incrementalSync(collectionSource.private ? "private" : "public", collectionSource.username, { silent: false });
   }
 
   function retry() {
