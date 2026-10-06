@@ -3548,6 +3548,11 @@ function SearchTab({ collectionSource, collectionItems, extrasMap, wantedIds, on
               const { artist, title } = splitArtistTitle(r, null);
               const tags = (r.style?.length ? r.style : r.genre) || [];
               const variant = getVariant(r);
+              // Only real releases carry these (master ids live in a different id space), and in
+              // collection-scoped browsing everything is owned, so the check would just be noise.
+              const isRelease = r.type !== "master";
+              const inCollection = loggedIn && isRelease && scope !== "in" && ownedIds.has(r.id);
+              const onWantlist = loggedIn && isRelease && Boolean(wantedIds?.has(r.id));
               return (
                 <button
                   type="button"
@@ -3555,12 +3560,28 @@ function SearchTab({ collectionSource, collectionItems, extrasMap, wantedIds, on
                   style={styles.searchCard}
                   onClick={() => openResult(r)}
                 >
-                  <SmartImage
-                    src={r.cover_image}
-                    alt={title || r.title}
-                    style={styles.searchCardCover}
-                    placeholderStyle={styles.coverPlaceholder}
-                  />
+                  <div style={{ position: "relative" }}>
+                    <SmartImage
+                      src={r.cover_image}
+                      alt={title || r.title}
+                      style={styles.searchCardCover}
+                      placeholderStyle={styles.coverPlaceholder}
+                    />
+                    {(inCollection || onWantlist) && (
+                      <div style={styles.searchBadgeRow}>
+                        {inCollection && (
+                          <span style={styles.searchBadge} title="In your collection" aria-label="In your collection">
+                            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#7bd88f" strokeWidth="3.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5" /></svg>
+                          </span>
+                        )}
+                        {onWantlist && (
+                          <span style={styles.searchBadge} title="On your wantlist" aria-label="On your wantlist">
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#f0b45a" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12z" /><circle cx="12" cy="12" r="3" fill="#f0b45a" /></svg>
+                          </span>
+                        )}
+                      </div>
+                    )}
+                  </div>
                   <div style={styles.searchCardBody}>
                     <p style={styles.searchCardTitle}>{title || r.title}</p>
                     {artist && <p style={styles.searchCardArtist}>{artist}</p>}
@@ -5214,6 +5235,17 @@ function buildStyles(PALETTE) {
     color: "inherit",
   },
   searchCardCover: { width: "100%", aspectRatio: "1 / 1", objectFit: "cover", background: PALETTE.border, display: "block" },
+  searchBadgeRow: { position: "absolute", top: 8, right: 8, display: "flex", gap: 4 },
+  searchBadge: {
+    width: 24,
+    height: 24,
+    borderRadius: 999,
+    background: "rgba(0,0,0,0.68)",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    boxShadow: "0 1px 3px rgba(0,0,0,0.4)",
+  },
   searchCardBody: { padding: "10px 12px 12px" },
   searchCardTitle: {
     fontSize: 13.5,
