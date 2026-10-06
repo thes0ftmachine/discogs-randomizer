@@ -45,7 +45,7 @@ export default async function handler(req, res) {
   // Ignores any username in the query on purpose — this always resolves to whoever the
   // session cookie says is logged in, so there's no way to request someone else's private
   // data by editing the query string.
-  if (kind === "my-collection") {
+  if (kind === "my-collection" || kind === "my-wantlist") {
     const session = readSignedCookie(req, "discogs_session");
     if (!session) return sendError(res, 401, "Not logged in to Discogs.");
 
@@ -53,7 +53,12 @@ export default async function handler(req, res) {
     const consumerSecret = process.env.DISCOGS_CONSUMER_SECRET;
     if (!consumerKey || !consumerSecret) return sendError(res, 500, "Discogs login has not been configured.");
 
-    const url = new URL(`/users/${session.username}/collection/folders/0/releases`, DISCOGS_BASE);
+    const url = new URL(
+      kind === "my-wantlist"
+        ? `/users/${session.username}/wants`
+        : `/users/${session.username}/collection/folders/0/releases`,
+      DISCOGS_BASE
+    );
     Object.entries(params).forEach(([key, value]) => {
       if (typeof value === "string") url.searchParams.set(key, value);
     });
