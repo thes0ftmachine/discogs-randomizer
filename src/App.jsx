@@ -2535,6 +2535,10 @@ function DiscoverTab({ collectionSource, collectionItems, extrasMap, wantedIds, 
                 placeholderStyle={styles.coverPlaceholder}
               />
             </a>
+            <OwnershipBadges
+              inCollection={loggedIn && !inCollectionModeForRender && ownedIds.has(result.id)}
+              onWantlist={loggedIn && Boolean(wantedIds?.has(result.id))}
+            />
             {images.length > 1 && (
               <>
                 <button
@@ -2906,6 +2910,27 @@ const VARIANT_COLORS = [
   [/green|lime|olive|mint/i, "#3fae5a"],
   [/brown|tan|bronze|copper/i, "#8b5a2b"],
 ];
+
+// Small corner icons for a cover: green check = in your collection, amber eye = on your wantlist.
+// Shared by the search grid cards and the random draw card so they stay identical.
+function OwnershipBadges({ inCollection, onWantlist }) {
+  const { styles } = useContext(PaletteContext);
+  if (!inCollection && !onWantlist) return null;
+  return (
+    <div style={styles.searchBadgeRow}>
+      {inCollection && (
+        <span style={styles.searchBadge} title="In your collection" aria-label="In your collection">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#7bd88f" strokeWidth="3.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5" /></svg>
+        </span>
+      )}
+      {onWantlist && (
+        <span style={styles.searchBadge} title="On your wantlist" aria-label="On your wantlist">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#f0b45a" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12z" /><circle cx="12" cy="12" r="3" fill="#f0b45a" /></svg>
+        </span>
+      )}
+    </div>
+  );
+}
 
 function getVariant(r) {
   const fmts = Array.isArray(r.formats) ? r.formats : [];
@@ -3567,20 +3592,7 @@ function SearchTab({ collectionSource, collectionItems, extrasMap, wantedIds, on
                       style={styles.searchCardCover}
                       placeholderStyle={styles.coverPlaceholder}
                     />
-                    {(inCollection || onWantlist) && (
-                      <div style={styles.searchBadgeRow}>
-                        {inCollection && (
-                          <span style={styles.searchBadge} title="In your collection" aria-label="In your collection">
-                            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#7bd88f" strokeWidth="3.2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5" /></svg>
-                          </span>
-                        )}
-                        {onWantlist && (
-                          <span style={styles.searchBadge} title="On your wantlist" aria-label="On your wantlist">
-                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#f0b45a" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12z" /><circle cx="12" cy="12" r="3" fill="#f0b45a" /></svg>
-                          </span>
-                        )}
-                      </div>
-                    )}
+                    <OwnershipBadges inCollection={inCollection} onWantlist={onWantlist} />
                   </div>
                   <div style={styles.searchCardBody}>
                     <p style={styles.searchCardTitle}>{title || r.title}</p>
