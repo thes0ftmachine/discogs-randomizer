@@ -1031,6 +1031,73 @@ function getInitialTheme() {
   return "dark";
 }
 
+// The logged-in person's wantlist as a Set of release ids, so cards can say "On your wantlist"
+// instead of offering to add something already there. Wantlists are small next to collections,
+// so this just re-reads the whole thing (newest-first, 100 per request) rather than caching:
+// on login, and again quietly when you come back to the tab after a few minutes. Failures are
+// silent on purpose — worst case a badge is missing and the add button shows as before.
+function useWantlistIds(collectionSource) {
+  const [wantedIds, setWantedIds] = useState(() => new Set());
+  const lastCheckRef = useRef(0);
+  const controllerRef = useRef(null);
+  const isPrivate = collectionSource?.private === true;
+  const username = collectionSource?.username || null;
+
+  const refresh = useCallback(async () => {
+    controllerRef.current?.abort();
+    const controller = new AbortController();
+    controllerRef.current = controller;
+    lastCheckRef.current = Date.now();
+    try {
+      const ids = new Set();
+      let page = 1;
+      while (true) {
+        const started = Date.now();
+        const data = await fetchCollectionPage(
+          { kind: "my-wantlist", page: String(page), per_page: String(COLLECTION_PER_PAGE), sort: "added", sort_order: "desc" },
+          controller.signal
+        );
+        for (const want of data?.wants || []) {
+          const id = want.id ?? want.basic_information?.id;
+          if (id != null) ids.add(id);
+        }
+        const pages = data?.pagination?.pages || 1;
+        if (page >= pages) break;
+        page++;
+        await abortableSleep(Math.max(0, MIN_PAGE_INTERVAL_MS - (Date.now() - started)), controller.signal);
+      }
+      if (!controller.signal.aborted) setWantedIds(ids);
+    } catch {
+      // Keep whatever we already had.
+    }
+  }, []);
+
+  useEffect(() => {
+    setWantedIds(new Set());
+    if (!isPrivate) {
+      controllerRef.current?.abort();
+      return undefined;
+    }
+    refresh();
+    function onVisible() {
+      if (document.visibilityState === "visible" && Date.now() - lastCheckRef.current > COLLECTION_RECHECK_MS) refresh();
+    }
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      document.removeEventListener("visibilitychange", onVisible);
+      controllerRef.current?.abort();
+    };
+  }, [isPrivate, username, refresh]);
+
+  // Called right after a successful add so the badge shows up immediately, without waiting
+  // for the next re-read.
+  const markWanted = useCallback((id) => {
+    setWantedIds((prev) => (prev.has(id) ? prev : new Set(prev).add(id)));
+  }, []);
+
+  return { wantedIds, markWanted };
+}
+
 export default function App() {
   const [tab, setTab] = useState("discover"); // 'discover' | 'search' | 'games'
   const [collectionSource, setCollectionSource] = useState(null); // { username } | null
@@ -1039,6 +1106,7 @@ export default function App() {
   const [collectionError, setCollectionError] = useState("");
   const [theme, setTheme] = useState(getInitialTheme);
   const extrasMap = useCollectionReleaseEnrichment(collectionItems, collectionSource?.username || null, collectionLoading);
+  const { wantedIds, markWanted } = useWantlistIds(collectionSource);
 
   useEffect(() => {
     try {
@@ -1224,10 +1292,10 @@ export default function App() {
         />
 
         {tab === "discover" && (
-          <DiscoverTab collectionSource={collectionSource} collectionItems={collectionItems} extrasMap={extrasMap} />
+          <DiscoverTab collectionSource={collectionSource} collectionItems={collectionItems} extrasMap={extrasMap} wantedIds={wantedIds} onWanted={markWanted} />
         )}
         {tab === "search" && (
-          <SearchTab collectionSource={collectionSource} collectionItems={collectionItems} extrasMap={extrasMap} />
+          <SearchTab collectionSource={collectionSource} collectionItems={collectionItems} extrasMap={extrasMap} wantedIds={wantedIds} onWanted={markWanted} />
         )}
         {tab === "games" && (
           <GamesTab collectionSource={collectionSource} collectionItems={collectionItems} />
@@ -1881,7 +1949,7 @@ function TracklistToggle({ tracklist, videos }) {
 // the logged-in person's wantlist without leaving the card. Lives inside the result card's
 // key={result.id} wrapper (like TracklistToggle) so it resets to idle on every new draw
 // rather than showing "✓ Added" for whatever record happened to be up before.
-function WantlistButton({ releaseId }) {
+function WantlistButton({ releaseId, onAdded }) {
   const { styles } = useContext(PaletteContext);
   const [state, setState] = useState("idle"); // idle | loading | done | error
   const [errorMsg, setErrorMsg] = useState("");
@@ -1893,6 +1961,7 @@ function WantlistButton({ releaseId }) {
     try {
       await addToDiscogs("wantlist", releaseId);
       setState("done");
+      onAdded?.(releaseId);
     } catch (e) {
       setState("error");
       setErrorMsg(e.message || "That didn't go through.");
@@ -1925,7 +1994,7 @@ function WantlistButton({ releaseId }) {
   );
 }
 
-function DiscoverTab({ collectionSource, collectionItems, extrasMap }) {
+function DiscoverTab({ collectionSource, collectionItems, extrasMap, wantedIds, onWanted }) {
   const { palette: PALETTE, styles } = useContext(PaletteContext);
   const [genre, setGenre] = useState("Any Genre");
   const [style, setStyle] = useState("");
@@ -2520,7 +2589,9 @@ function DiscoverTab({ collectionSource, collectionItems, extrasMap }) {
                   </p>
                 )}
                 {loggedIn && !inCollectionModeForRender && !ownedIds.has(result.id) && (
-                  <WantlistButton releaseId={result.id} />
+                  wantedIds?.has(result.id)
+                    ? <span style={styles.wantlistBadge}>✓ On your wantlist</span>
+                    : <WantlistButton releaseId={result.id} onAdded={onWanted} />
                 )}
               </div>
             )}
@@ -2867,7 +2938,7 @@ function VariantDot({ hex }) {
   );
 }
 
-function SearchTab({ collectionSource, collectionItems, extrasMap }) {
+function SearchTab({ collectionSource, collectionItems, extrasMap, wantedIds, onWanted }) {
   const { styles } = useContext(PaletteContext);
   const [query, setQuery] = useState("");
   const [submittedQuery, setSubmittedQuery] = useState("");
@@ -3548,6 +3619,8 @@ function SearchTab({ collectionSource, collectionItems, extrasMap }) {
           onClose={closeModal}
           loggedIn={loggedIn}
           alreadyOwned={ownedIds.has(selected.id)}
+          alreadyWanted={wantedIds?.has(selected.id)}
+          onWanted={onWanted}
         />
       )}
     </>
@@ -3692,7 +3765,7 @@ function Tracklist({ tracklist, videos }) {
 // (or failing) doesn't affect the other, and a completed add shows a plain confirmation
 // rather than trying to reflect Discogs' state back with a toggle — this app has no reliable
 // way to know if something was *removed* on Discogs' side since the collection was cached.
-function CollectionActions({ releaseId, alreadyOwned }) {
+function CollectionActions({ releaseId, alreadyOwned, alreadyWanted, onWanted }) {
   const { styles } = useContext(PaletteContext);
   const [state, setState] = useState({ collection: "idle", wantlist: "idle" });
   const [errorMsg, setErrorMsg] = useState({ collection: "", wantlist: "" });
@@ -3703,6 +3776,7 @@ function CollectionActions({ releaseId, alreadyOwned }) {
     try {
       await addToDiscogs(action, releaseId);
       setState((s) => ({ ...s, [action]: "done" }));
+      if (action === "wantlist") onWanted?.(releaseId);
     } catch (e) {
       setState((s) => ({ ...s, [action]: "error" }));
       setErrorMsg((s) => ({ ...s, [action]: e.message || "That didn't go through." }));
@@ -3727,11 +3801,11 @@ function CollectionActions({ releaseId, alreadyOwned }) {
       </button>
       <button
         type="button"
-        style={{ ...styles.collectionActionButton, ...(state.wantlist === "done" ? styles.collectionActionButtonDone : {}) }}
+        style={{ ...styles.collectionActionButton, ...(state.wantlist === "done" || (alreadyWanted && state.wantlist === "idle") ? styles.collectionActionButtonDone : {}) }}
         onClick={() => handleAdd("wantlist")}
-        disabled={state.wantlist === "loading" || state.wantlist === "done"}
+        disabled={state.wantlist === "loading" || state.wantlist === "done" || (alreadyWanted && state.wantlist === "idle")}
       >
-        {buttonLabel("wantlist", "✓ Added", "+ Add to Wantlist")}
+        {alreadyWanted && state.wantlist === "idle" ? "✓ On your wantlist" : buttonLabel("wantlist", "✓ Added", "+ Add to Wantlist")}
       </button>
       {(errorMsg.collection || errorMsg.wantlist) && (
         <p style={styles.collectionActionError}>{errorMsg.collection || errorMsg.wantlist}</p>
@@ -3740,7 +3814,7 @@ function CollectionActions({ releaseId, alreadyOwned }) {
   );
 }
 
-function SearchResultModal({ result, detail, loading, error, imageIndex, setImageIndex, onClose, loggedIn, alreadyOwned }) {
+function SearchResultModal({ result, detail, loading, error, imageIndex, setImageIndex, onClose, loggedIn, alreadyOwned, alreadyWanted, onWanted }) {
   const { styles } = useContext(PaletteContext);
   const isMaster = result.type === "master";
   const images = detail?.images || [];
@@ -3829,7 +3903,7 @@ function SearchResultModal({ result, detail, loading, error, imageIndex, setImag
             </p>
           )}
 
-          {loggedIn && !isMaster && <CollectionActions releaseId={result.id} alreadyOwned={alreadyOwned} />}
+          {loggedIn && !isMaster && <CollectionActions releaseId={result.id} alreadyOwned={alreadyOwned} alreadyWanted={alreadyWanted} onWanted={onWanted} />}
 
           {(detail?.genres || result.genre || []).length > 0 && (
             <div style={styles.metaRow}>
@@ -4788,6 +4862,18 @@ function buildStyles(PALETTE) {
     cursor: "pointer",
   },
   wantlistButtonDone: { background: PALETTE.accentDark, color: "#fff" },
+  wantlistBadge: {
+    marginLeft: "auto",
+    marginBottom: 6,
+    flexShrink: 0,
+    fontSize: 11.5,
+    fontWeight: 700,
+    padding: "3px 9px",
+    borderRadius: 999,
+    border: `1px solid ${PALETTE.accentDark}`,
+    color: PALETTE.accentDark,
+    whiteSpace: "nowrap",
+  },
   wantlistButtonError: { borderColor: PALETTE.danger, color: PALETTE.danger },
   artistLink: { color: "inherit", textDecoration: "none" },
   cardSubline: { fontSize: 13, color: PALETTE.muted, margin: "0 0 12px" },
