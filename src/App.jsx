@@ -1037,7 +1037,9 @@ function getInitialTheme() {
 // on login, and again quietly when you come back to the tab after a few minutes. Failures are
 // silent on purpose — worst case a badge is missing and the add button shows as before.
 function useWantlistIds(collectionSource) {
-  const [wantedIds, setWantedIds] = useState(() => new Set());
+  const [wantlistItems, setWantlistItems] = useState([]); // full entries, same shape as collection items
+  const [optimisticIds, setOptimisticIds] = useState(() => new Set()); // just-added, before the next re-read
+  const [wantlistLoading, setWantlistLoading] = useState(false);
   const lastCheckRef = useRef(0);
   const controllerRef = useRef(null);
   const isPrivate = collectionSource?.private === true;
@@ -1048,8 +1050,9 @@ function useWantlistIds(collectionSource) {
     const controller = new AbortController();
     controllerRef.current = controller;
     lastCheckRef.current = Date.now();
+    setWantlistLoading(true);
     try {
-      const ids = new Set();
+      const items = [];
       let page = 1;
       while (true) {
         const started = Date.now();
@@ -1058,24 +1061,27 @@ function useWantlistIds(collectionSource) {
           controller.signal
         );
         for (const want of data?.wants || []) {
-          const id = want.id ?? want.basic_information?.id;
-          if (id != null) ids.add(id);
+          if ((want.id ?? want.basic_information?.id) != null) items.push(want);
         }
         const pages = data?.pagination?.pages || 1;
         if (page >= pages) break;
         page++;
         await abortableSleep(Math.max(0, MIN_PAGE_INTERVAL_MS - (Date.now() - started)), controller.signal);
       }
-      if (!controller.signal.aborted) setWantedIds(ids);
+      if (!controller.signal.aborted) setWantlistItems(items);
     } catch {
       // Keep whatever we already had.
+    } finally {
+      if (controllerRef.current === controller) setWantlistLoading(false);
     }
   }, []);
 
   useEffect(() => {
-    setWantedIds(new Set());
+    setWantlistItems([]);
+    setOptimisticIds(new Set());
     if (!isPrivate) {
       controllerRef.current?.abort();
+      setWantlistLoading(false);
       return undefined;
     }
     refresh();
@@ -1089,13 +1095,23 @@ function useWantlistIds(collectionSource) {
     };
   }, [isPrivate, username, refresh]);
 
-  // Called right after a successful add so the badge shows up immediately, without waiting
-  // for the next re-read.
-  const markWanted = useCallback((id) => {
-    setWantedIds((prev) => (prev.has(id) ? prev : new Set(prev).add(id)));
-  }, []);
+  const wantedIds = useMemo(() => {
+    const ids = new Set(optimisticIds);
+    for (const w of wantlistItems) ids.add(w.id ?? w.basic_information?.id);
+    return ids;
+  }, [wantlistItems, optimisticIds]);
 
-  return { wantedIds, markWanted };
+  // Called right after a successful add: the badge shows up immediately, and a re-read pulls
+  // the new entry's full details in so it also appears when browsing the wantlist.
+  const markWanted = useCallback(
+    (id) => {
+      setOptimisticIds((prev) => (prev.has(id) ? prev : new Set(prev).add(id)));
+      refresh();
+    },
+    [refresh]
+  );
+
+  return { wantedIds, wantlistItems, wantlistLoading, markWanted };
 }
 
 export default function App() {
@@ -1106,7 +1122,7 @@ export default function App() {
   const [collectionError, setCollectionError] = useState("");
   const [theme, setTheme] = useState(getInitialTheme);
   const extrasMap = useCollectionReleaseEnrichment(collectionItems, collectionSource?.username || null, collectionLoading);
-  const { wantedIds, markWanted } = useWantlistIds(collectionSource);
+  const { wantedIds, wantlistItems, wantlistLoading, markWanted } = useWantlistIds(collectionSource);
 
   useEffect(() => {
     try {
@@ -1292,10 +1308,10 @@ export default function App() {
         />
 
         {tab === "discover" && (
-          <DiscoverTab collectionSource={collectionSource} collectionItems={collectionItems} extrasMap={extrasMap} wantedIds={wantedIds} onWanted={markWanted} />
+          <DiscoverTab collectionSource={collectionSource} collectionItems={collectionItems} extrasMap={extrasMap} wantedIds={wantedIds} onWanted={markWanted} wantlistItems={wantlistItems} wantlistLoading={wantlistLoading} />
         )}
         {tab === "search" && (
-          <SearchTab collectionSource={collectionSource} collectionItems={collectionItems} extrasMap={extrasMap} wantedIds={wantedIds} onWanted={markWanted} />
+          <SearchTab collectionSource={collectionSource} collectionItems={collectionItems} extrasMap={extrasMap} wantedIds={wantedIds} onWanted={markWanted} wantlistItems={wantlistItems} wantlistLoading={wantlistLoading} />
         )}
         {tab === "games" && (
           <GamesTab collectionSource={collectionSource} collectionItems={collectionItems} />
@@ -1994,7 +2010,7 @@ function WantlistButton({ releaseId, onAdded }) {
   );
 }
 
-function DiscoverTab({ collectionSource, collectionItems, extrasMap, wantedIds, onWanted }) {
+function DiscoverTab({ collectionSource, collectionItems, extrasMap, wantedIds, onWanted, wantlistItems, wantlistLoading }) {
   const { palette: PALETTE, styles } = useContext(PaletteContext);
   const [genre, setGenre] = useState("Any Genre");
   const [style, setStyle] = useState("");
@@ -2022,7 +2038,7 @@ function DiscoverTab({ collectionSource, collectionItems, extrasMap, wantedIds, 
   // original, only behavior this tab had), 'out' draws from the live catalog with owned
   // releases excluded, 'both' draws from the live catalog without excluding them. Only
   // meaningful once a collection is connected.
-  const [scope, setScope] = useState("in"); // 'in' | 'out' | 'both'
+  const [scope, setScope] = useState("in"); // 'in' | 'out' | 'both' | 'wants'
   const ownedIds = useMemo(
     () => new Set((collectionItems || []).map((it) => it.basic_information?.id).filter(Boolean)),
     [collectionItems]
@@ -2128,7 +2144,14 @@ function DiscoverTab({ collectionSource, collectionItems, extrasMap, wantedIds, 
       const needsRatingCheck = minRating > 0;
       const needsDetailForSelection = needsRatingCheck || onlyArtwork || !!extraCheck;
       const maxAttempts = 10;
-      const inCollectionMode = scope === "in" && !!(collectionItems && collectionItems.length);
+      // 'in' and 'wants' both draw client-side from a cached list; only the list differs.
+      const listItems = scope === "wants" ? wantlistItems : collectionItems;
+      const inCollectionMode = (scope === "in" || scope === "wants") && !!(listItems && listItems.length);
+      if (scope === "wants" && !inCollectionMode) {
+        setEmptyNotice(wantlistLoading ? "Still loading your wantlist — try again in a moment." : "Your wantlist is empty.");
+        setLoading(false);
+        return null;
+      }
 
       let found = null;
       let foundDetail = null;
@@ -2143,7 +2166,7 @@ function DiscoverTab({ collectionSource, collectionItems, extrasMap, wantedIds, 
           formats,
         };
         const outcome = await randomFromCollection(
-          collectionItems,
+          listItems,
           filters,
           seenIdsRef.current,
           needsDetailForSelection,
@@ -2238,8 +2261,8 @@ function DiscoverTab({ collectionSource, collectionItems, extrasMap, wantedIds, 
         setEmptyNotice(
           inCollectionMode
             ? (anyResultsAtAll
-                ? "Found matches in the collection, but none cleared the extra filters. Try loosening things a bit or just try again - Discogs can get stuck trying to find stuff."
-                : "Nothing in this collection matched that combination. Try loosening a filter or just trying again.")
+                ? `Found matches in the ${scope === "wants" ? "wantlist" : "collection"}, but none cleared the extra filters. Try loosening things a bit or just try again - Discogs can get stuck trying to find stuff.`
+                : `Nothing in this ${scope === "wants" ? "wantlist" : "collection"} matched that combination. Try loosening a filter or just trying again.`)
             : (anyResultsAtAll
                 ? "Found matches, but couldn't find one that also cleared the extra filters after several tries. Try loosening things a bit or just trying again."
                 : "Nothing matched that combination. Try loosening a filter — style and country are the most restrictive. Though you might actually be able to try again and see what happens.")
@@ -2363,7 +2386,9 @@ function DiscoverTab({ collectionSource, collectionItems, extrasMap, wantedIds, 
   const ratingInfo = detail?.community?.rating;
   const hasResultContext = !!result;
   const releaseUrl = result ? "https://www.discogs.com" + (result.uri || "") : "";
-  const inCollectionModeForRender = !!collectionSource && scope === "in";
+  // True for any scope that draws from a cached list (collection or wantlist) rather than the
+  // live catalog: those lists have no country data, and everything in them is already owned/wanted.
+  const inCollectionModeForRender = !!collectionSource && (scope === "in" || scope === "wants");
 
   return (
     <>
@@ -2390,6 +2415,15 @@ function DiscoverTab({ collectionSource, collectionItems, extrasMap, wantedIds, 
           >
             Both
           </button>
+          {loggedIn && (
+            <button
+              type="button"
+              style={{ ...styles.scopeToggleButton, ...(scope === "wants" ? styles.scopeToggleButtonActive : {}) }}
+              onClick={() => setScope("wants")}
+            >
+              Wantlist
+            </button>
+          )}
         </div>
       )}
 
@@ -2399,7 +2433,9 @@ function DiscoverTab({ collectionSource, collectionItems, extrasMap, wantedIds, 
             ? "Find me…"
             : scope === "in"
               ? `Find me… (from ${collectionSource.username}'s collection)`
-              : scope === "out"
+              : scope === "wants"
+                ? `Find me… (from ${collectionSource.username}'s wantlist)`
+                : scope === "out"
                 ? `Find me… (outside ${collectionSource.username}'s collection)`
                 : `Find me… (catalog + ${collectionSource.username}'s collection)`}
         </p>
@@ -2536,8 +2572,8 @@ function DiscoverTab({ collectionSource, collectionItems, extrasMap, wantedIds, 
               />
             </a>
             <OwnershipBadges
-              inCollection={loggedIn && !inCollectionModeForRender && ownedIds.has(result.id)}
-              onWantlist={loggedIn && Boolean(wantedIds?.has(result.id))}
+              inCollection={loggedIn && scope !== "in" && ownedIds.has(result.id)}
+              onWantlist={loggedIn && scope !== "wants" && Boolean(wantedIds?.has(result.id))}
             />
             {images.length > 1 && (
               <>
@@ -2963,7 +2999,7 @@ function VariantDot({ hex }) {
   );
 }
 
-function SearchTab({ collectionSource, collectionItems, extrasMap, wantedIds, onWanted }) {
+function SearchTab({ collectionSource, collectionItems, extrasMap, wantedIds, onWanted, wantlistItems, wantlistLoading }) {
   const { styles } = useContext(PaletteContext);
   const [query, setQuery] = useState("");
   const [submittedQuery, setSubmittedQuery] = useState("");
@@ -2972,7 +3008,9 @@ function SearchTab({ collectionSource, collectionItems, extrasMap, wantedIds, on
   // Only meaningful once a collection is connected — "in" mirrors the old behavior (search
   // scoped entirely to the connected collection). "out" and "both" both hit the live Discogs
   // catalog, so they carry a real network search and the releases-only/sort controls apply.
-  const [scope, setScope] = useState("in"); // 'in' | 'out' | 'both'
+  const [scope, setScope] = useState("in"); // 'in' | 'out' | 'both' | 'wants'
+  const wantlistItemsRef = useRef(wantlistItems);
+  wantlistItemsRef.current = wantlistItems; // runSearch is memoized with no deps, so it reads the live list through this
   const [collectionPreview, setCollectionPreview] = useState([]); // 'both' mode only: top few in-collection matches
   const [collectionPreviewTotal, setCollectionPreviewTotal] = useState(0);
   const [filterGenre, setFilterGenre] = useState("Any Genre");
@@ -3023,8 +3061,8 @@ function SearchTab({ collectionSource, collectionItems, extrasMap, wantedIds, on
     if (!q.trim() && !source && !isAnyFilterActive(filters)) return;
     requestRef.current?.abort();
 
-    if (effectiveScope === "in") {
-      // Collection-scoped: everything's already cached, so this is just a synchronous
+    if (effectiveScope === "in" || effectiveScope === "wants") {
+      // Collection- or wantlist-scoped: everything's already cached, so this is just a synchronous
       // filter + sort + slice, no network call and no "releases only" toggle to apply
       // (collection releases are, well, always releases). A blank query matches everything,
       // which is what makes this double as a browse-the-whole-collection mode.
@@ -3032,7 +3070,8 @@ function SearchTab({ collectionSource, collectionItems, extrasMap, wantedIds, on
       setError("");
       setCollectionPreview([]);
       setCollectionPreviewTotal(0);
-      const sorted = collectionMatches(items, q, sort, filters, extrasMapArg);
+      const listItems = effectiveScope === "wants" ? wantlistItemsRef.current : items;
+      const sorted = collectionMatches(listItems, q, sort, filters, extrasMapArg);
       const perPage = SEARCH_RESULTS_PER_PAGE;
       const totalPages = Math.max(1, Math.ceil(sorted.length / perPage));
       const clampedPage = Math.min(Math.max(pageNum, 1), totalPages);
@@ -3263,6 +3302,13 @@ function SearchTab({ collectionSource, collectionItems, extrasMap, wantedIds, on
   }, [collectionKey]);
 
 
+  useEffect(() => {
+    if (scope !== "wants" || !hasSearched) return;
+    setPage(1);
+    runSearch(submittedQuery, 1, releasesOnly, sortMode, collectionSource, collectionItems, currentFilters(), "wants", extrasMap);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [wantlistItems]);
+
   function handleSubmit(e) {
     e.preventDefault();
     const q = query.trim();
@@ -3469,8 +3515,21 @@ function SearchTab({ collectionSource, collectionItems, extrasMap, wantedIds, on
             >
               Both
             </button>
+            {loggedIn && (
+              <button
+                type="button"
+                style={{ ...styles.scopeToggleButton, ...(scope === "wants" ? styles.scopeToggleButtonActive : {}) }}
+                onClick={() => changeScope("wants")}
+              >
+                Wantlist
+              </button>
+            )}
           </div>
           <p style={styles.modeNotice}>
+            {scope === "wants" &&
+              (wantlistLoading && !wantlistItems?.length
+                ? "Loading your wantlist…"
+                : `${hasSearched && !submittedQuery.trim() ? "Browsing" : "Searching within"} ${collectionSource.username}'s wantlist (${wantlistItems?.length ?? 0} releases).`)}
             {scope === "in" &&
               `${hasSearched && !submittedQuery.trim() ? "Browsing" : "Searching within"} ${collectionSource.username}'s collection (${collectionItems?.length ?? 0} releases).`}
             {scope === "out" &&
@@ -3502,7 +3561,7 @@ function SearchTab({ collectionSource, collectionItems, extrasMap, wantedIds, on
             type="checkbox"
             checked={releasesOnly}
             onChange={handleToggleReleasesOnly}
-            disabled={scope === "in"}
+            disabled={scope === "in" || scope === "wants"}
           />
           Releases only (hide masters)
         </label>
@@ -3512,8 +3571,12 @@ function SearchTab({ collectionSource, collectionItems, extrasMap, wantedIds, on
           ))}
         </select>
       </div>
-      {scope === "in" && (
-        <p style={styles.hintText}>A connected collection only holds releases, so this filter doesn't apply.</p>
+      {(scope === "in" || scope === "wants") && (
+        <p style={styles.hintText}>
+          {scope === "wants"
+            ? "A wantlist only holds releases, so this filter doesn't apply."
+            : "A connected collection only holds releases, so this filter doesn't apply."}
+        </p>
       )}
 
       {!hasSearched && !loading && (
@@ -3562,7 +3625,9 @@ function SearchTab({ collectionSource, collectionItems, extrasMap, wantedIds, on
         <div style={styles.emptyBox}>
           {scope === "in"
             ? "Nothing in the collection matched that."
-            : 'Nothing matched that search. Try a broader term, or turn off "Releases only."'}
+            : scope === "wants"
+              ? "Nothing on your wantlist matched that."
+              : 'Nothing matched that search. Try a broader term, or turn off "Releases only."'}
         </div>
       )}
 
@@ -3577,7 +3642,7 @@ function SearchTab({ collectionSource, collectionItems, extrasMap, wantedIds, on
               // collection-scoped browsing everything is owned, so the check would just be noise.
               const isRelease = r.type !== "master";
               const inCollection = loggedIn && isRelease && scope !== "in" && ownedIds.has(r.id);
-              const onWantlist = loggedIn && isRelease && Boolean(wantedIds?.has(r.id));
+              const onWantlist = loggedIn && isRelease && scope !== "wants" && Boolean(wantedIds?.has(r.id));
               return (
                 <button
                   type="button"
@@ -4715,9 +4780,10 @@ function buildStyles(PALETTE) {
   },
   gameTabButtonActive: { background: PALETTE.accent, color: "#fff", borderColor: PALETTE.accent },
 
-  scopeToggleRow: { display: "flex", gap: 8, marginTop: 10 },
+  scopeToggleRow: { display: "flex", flexWrap: "wrap", gap: 8, marginTop: 10 },
   scopeToggleButton: {
-    flex: 1,
+    flex: "1 1 auto",
+    whiteSpace: "nowrap",
     padding: "7px 8px",
     borderRadius: 999,
     border: `1px solid ${PALETTE.muted}`,
